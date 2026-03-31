@@ -1,2 +1,24 @@
+# --- IDE / Editor ------------------------------------------------------------
 .vscode/settings.json
+
+# --- Project docs (not for repo) ---------------------------------------------
 SmartStudy_CC_Project_Statement.pdf
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# --- Environment secrets -----------------------------------------------------
+.env
+
+# --- OS files ----------------------------------------------------------------
+.DS_Store
+Thumbs.db

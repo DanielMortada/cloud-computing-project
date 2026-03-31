@@ -1,0 +1,9 @@
+# SmartStudy — Chat API dependencies
+flask>=3.0.0
+flask-cors>=4.0.0
+gunicorn>=22.0.0
+langchain-google-vertexai>=2.0.0
+langchain-mongodb>=0.3.0
+langchain-core>=0.3.0
+langchain>=0.3.0
+pymongo[srv]>=4.6.0
