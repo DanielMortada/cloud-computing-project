@@ -1,94 +1,68 @@
-# SmartStudy 🎓 — Cloud-Native AI Tutor
+# SmartStudy - Cloud-Native AI Tutor
 
-> **INFO-H505 Cloud Computing Project — ULB 2025-2026**
->
-> An automated, cloud-native study assistant that lets you upload lecture PDFs
-> and immediately chat with an AI tutor to prepare for exams.
+> INFO-H505 Cloud Computing Project - ULB 2025-2026
 
----
+SmartStudy is a cloud-native study assistant for lecture PDFs. A student uploads a PDF in the Streamlit UI, the Chat API stores it in Google Cloud Storage through `POST /upload`, GCS events trigger ingestion and cleanup functions, and the chat backend answers questions with grounded citations from MongoDB Atlas.
 
-## 📐 Architecture Overview
+## Architecture
 
-```
-┌──────────────┐        ┌────────────────────────────────────────┐
-│   Student    │        │          Google Cloud Platform          │
-│   Browser    │        │                                        │
-│              │        │  ┌──────────────────────────────────┐  │
-│  Streamlit   │◄──────►│  │  Chat API (Cloud Run)            │  │
-│  (Cloud Run) │  HTTP  │  │  Flask + LangChain + Gemini 2.5  │  │
-│              │        │  │  + Conversation Memory            │  │
-└──────────────┘        │  └──────────┬───────────────────────┘  │
-                        │             │ vector search             │
-                        │             ▼                           │
-                        │  ┌──────────────────────┐              │
-                        │  │  MongoDB Atlas        │              │
-                        │  │  • context (vectors)  │              │
-                        │  │  • chat_history       │              │
-                        │  └──────────────────────┘              │
-                        │             ▲                           │
-                        │             │ upsert embeddings         │
-                        │  ┌──────────┴───────────────────────┐  │
-                        │  │  Cloud Function (Python)          │  │
-                        │  │  Triggered by GCS "finalize"      │  │
-                        │  │  PDF → chunks → embeddings → DB   │  │
-                        │  └──────────┬───────────────────────┘  │
-                        │             │ trigger                   │
-                        │  ┌──────────┴───────────────────────┐  │
-                        │  │  GCS Bucket (smartstudy-pdfs)     │  │
-                        │  │  Upload lecture PDFs here         │  │
-                        │  └──────────────────────────────────┘  │
-                        └────────────────────────────────────────┘
-```
+The live system is made of four main parts:
 
-**Data flow:**
+- Streamlit UI on Cloud Run
+- Chat API on Cloud Run
+- GCS-triggered ingest function for PDF processing
+- GCS-delete-trigger cleanup function for removing document vectors
 
-1. Student uploads a PDF to the GCS bucket.
-2. The upload triggers a **Cloud Function** that extracts text, chunks it,
-   generates vector embeddings (Vertex AI), and stores them in **MongoDB Atlas**.
-3. Student asks a question via the **Streamlit** web UI.
-4. The **Chat API** retrieves relevant chunks from MongoDB (vector search),
-   sends them + the question + chat history to **Gemini 2.5 Flash**, and
-   returns a grounded, cited answer.
+High-level flow:
 
----
+1. The user opens the Streamlit app.
+2. The UI calls the Chat API upload endpoint at `/upload`.
+3. The API writes the PDF to the GCS bucket.
+4. GCS finalization triggers the ingest Cloud Function.
+5. The ingest function extracts text, chunks it, creates embeddings, and stores vectors in MongoDB Atlas.
+6. The user asks a question in the UI.
+7. The UI calls the Chat API chat endpoint.
+8. The API runs vector search, builds the prompt, and returns a grounded answer with citations.
+9. If a PDF is deleted from GCS, the cleanup function removes its vectors from MongoDB.
 
-## 🗂️ Project Structure
+For diagrams and deeper implementation notes, see:
 
-```
+- [Architecture overview](docs/architecture-overview.md)
+- [Architecture deep dive](docs/architecture-dev.md)
+
+## Repository Layout
+
+```text
 cloud-computing-project/
-├── cloud_function/          # GCS-triggered PDF ingestion pipeline
-│   ├── main.py              #   Cloud Function entry point
-│   └── requirements.txt     #   Python dependencies
-│
-├── chat_api/                # RAG chat backend (Flask)
-│   ├── main.py              #   API server + LangChain RAG chain
-│   ├── requirements.txt     #   Python dependencies
-│   └── Dockerfile           #   Container for Cloud Run
-│
-├── streamlit_app/           # Web UI (Streamlit)
-│   ├── app.py               #   Chat interface
-│   ├── requirements.txt     #   Python dependencies
-│   └── Dockerfile           #   Container for Cloud Run
-│
-├── .env.example             # Template for environment variables
-├── .gitignore
-├── project-context.md       # Project instructions (markdown)
-└── README.md                # ← You are here
+  chat_api/          Flask + LangChain RAG backend deployed to Cloud Run
+  cloud_function/    GCS-triggered PDF ingestion and cleanup functions
+  docs/              Architecture documentation
+  streamlit_app/     Streamlit UI deployed to Cloud Run
+  .env.example       Environment variable template
+  README.md          Project setup and usage
 ```
 
----
+## Prerequisites
 
-## ⚙️ Prerequisites
+- Google Cloud SDK (`gcloud`)
+- Python 3.12+
+- Docker
+- MongoDB Atlas account with a vector-search-capable cluster
+- A GCP project with billing enabled
 
-| Tool | Purpose |
-|------|---------|
-| [Google Cloud SDK (`gcloud`)](https://cloud.google.com/sdk/docs/install) | CLI for GCP deployment |
-| [Python 3.12+](https://www.python.org/) | Runtime for all services |
-| [Docker](https://docs.docker.com/get-docker/) | Build containers for Cloud Run |
-| MongoDB Atlas account | Free-tier cluster for vector search |
-| GCP project with billing | Use the $50 student coupon |
+## From-Scratch Setup
 
-**GCP APIs to enable:**
+1. Clone the repository and prepare your environment.
+
+```bash
+git clone https://github.com/DanielMortada/cloud-computing-project.git
+cd cloud-computing-project
+cp .env.example .env
+```
+
+2. Edit `.env` with your GCP project ID, region, MongoDB connection string, and bucket name.
+
+3. Enable the required Google Cloud APIs.
 
 ```bash
 gcloud services enable \
@@ -100,20 +74,7 @@ gcloud services enable \
   eventarc.googleapis.com
 ```
 
----
-
-## 🚀 Setup & Deployment
-
-### 1. Clone and configure
-
-```bash
-git clone https://github.com/DanielMortada/cloud-computing-project.git
-cd cloud-computing-project
-cp .env.example .env
-# Edit .env with your actual values (MongoDB URI, GCP project ID, etc.)
-```
-
-### 2. Create the GCS bucket
+4. Create the GCS bucket used for uploads.
 
 ```bash
 gcloud storage buckets create gs://YOUR_BUCKET_NAME \
@@ -121,7 +82,7 @@ gcloud storage buckets create gs://YOUR_BUCKET_NAME \
   --uniform-bucket-level-access
 ```
 
-### 3. Deploy the Cloud Function
+5. Deploy the ingest function.
 
 ```bash
 cd cloud_function
@@ -134,14 +95,30 @@ gcloud functions deploy smartstudy-ingest \
   --entry-point=process_pdf \
   --trigger-event-filters="type=google.cloud.storage.object.v1.finalized" \
   --trigger-event-filters="bucket=YOUR_BUCKET_NAME" \
-  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,GCP_PROJECT_ID=...,GCP_REGION=europe-west1" \
-  --memory=512Mi \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
+  --memory=1Gi \
+  --timeout=300s
+```
+
+6. Deploy the cleanup function.
+
+```bash
+gcloud functions deploy smartstudy-cleanup \
+  --gen2 \
+  --region=europe-west1 \
+  --runtime=python312 \
+  --source=. \
+  --entry-point=cleanup_deleted_pdf \
+  --trigger-event-filters="type=google.cloud.storage.object.v1.deleted" \
+  --trigger-event-filters="bucket=YOUR_BUCKET_NAME" \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
+  --memory=1Gi \
   --timeout=300s
 
 cd ..
 ```
 
-### 4. Deploy the Chat API to Cloud Run
+7. Deploy the Chat API to Cloud Run.
 
 ```bash
 cd chat_api
@@ -150,13 +127,13 @@ gcloud run deploy smartstudy-chat-api \
   --source=. \
   --region=europe-west1 \
   --allow-unauthenticated \
-  --set-env-vars="MONGODB_URI=...,GCP_PROJECT_ID=...,GCP_REGION=europe-west1" \
-  --memory=512Mi
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
+  --memory=1Gi
 
 cd ..
 ```
 
-### 5. Deploy the Streamlit UI to Cloud Run
+8. Deploy the Streamlit UI to Cloud Run.
 
 ```bash
 cd streamlit_app
@@ -171,28 +148,47 @@ gcloud run deploy smartstudy-ui \
 cd ..
 ```
 
-### 6. Upload a PDF to test
+## Verify the Deployment
+
+Use these commands to confirm the live services and functions after deployment:
 
 ```bash
-gcloud storage cp my-lecture.pdf gs://YOUR_BUCKET_NAME/
-# The Cloud Function triggers automatically — check logs:
-gcloud functions logs read smartstudy-ingest --region=europe-west1
+gcloud run services describe smartstudy-chat-api --region=europe-west1 --project=YOUR_PROJECT_ID --format="value(status.url)"
+gcloud run services describe smartstudy-ui --region=europe-west1 --project=YOUR_PROJECT_ID --format="value(status.url)"
+gcloud functions describe smartstudy-ingest --gen2 --region=europe-west1 --project=YOUR_PROJECT_ID
+gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --project=YOUR_PROJECT_ID
 ```
 
----
+## Test the End-to-End Flow
 
-## 🧪 Local Development
+1. Upload a PDF through the Streamlit UI, or call the upload endpoint indirectly by using the UI.
+2. Confirm the file appears in GCS.
+3. Watch the ingest function logs.
+4. Ask a question in the UI and verify the answer includes sources.
+5. Delete the PDF from GCS and confirm the cleanup function removes the vectors.
 
-To run the Chat API locally:
+Useful commands:
+
+```bash
+gcloud storage cp my-lecture.pdf gs://YOUR_BUCKET_NAME/uploads/my-lecture.pdf
+gcloud functions logs read smartstudy-ingest --region=europe-west1 --limit=100
+gcloud storage rm gs://YOUR_BUCKET_NAME/uploads/my-lecture.pdf
+gcloud functions logs read smartstudy-cleanup --region=europe-west1 --limit=100
+```
+
+## Local Development
+
+Run the services locally if you want to iterate before deployment.
+
+Chat API:
 
 ```bash
 cd chat_api
 pip install -r requirements.txt
-# Make sure .env is loaded (or export vars manually)
 python main.py
 ```
 
-To run the Streamlit UI locally:
+Streamlit UI:
 
 ```bash
 cd streamlit_app
@@ -200,52 +196,28 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
----
+## MongoDB Atlas Setup
 
-## 🧠 Key Features
+Create a database named `smartstudy` with these collections:
 
-| Feature | Status | Description |
-|---------|--------|-------------|
-| **PDF Ingestion Pipeline** | ✅ | GCS upload → Cloud Function → chunks → embeddings → MongoDB |
-| **RAG Chat** | ✅ | Vector search + Gemini 2.5 Flash with source citations |
-| **Tutor Persona** | ✅ | System prompt enforces academic style, citations, study tips |
-| **Conversation Memory** | ✅ | Chat history stored in MongoDB, persists across messages |
-| **Quiz Mode** | ✅ | `/quiz` command generates MCQ from lecture material |
-| **Web Interface** | ✅ | Streamlit on Cloud Run |
+- `context` for PDF chunks and embeddings
+- `chat_history` for conversation state
 
----
+Create a vector search index named `vector_index` on the `context` collection. The current embedding dimension is `768` and similarity is `cosine`.
 
-## 📚 MongoDB Atlas Setup
+## Current Notes
 
-1. Create a free-tier M0 cluster at [cloud.mongodb.com](https://cloud.mongodb.com).
-2. Create a database called `smartstudy` with two collections:
-   - `context` — stores document chunks + vector embeddings
-   - `chat_history` — stores conversation messages
-3. Create a **Vector Search Index** on the `context` collection named `vector_index`:
+- Uploads are handled by the Chat API through `/upload`, not by direct browser-to-GCS writes.
+- Ingestion is event-driven and reproducible: a finalized object in GCS is what starts PDF processing.
+- Cleanup is also event-driven: deleting a PDF from GCS removes its stored vectors.
+- The Streamlit chat transcript is still session-based, so a full browser refresh resets the visible UI state.
 
-   ```json
-   {
-     "fields": [
-       {
-         "type": "vector",
-         "path": "vectorEmbedding",
-         "numDimensions": 768,
-         "similarity": "cosine"
-       }
-     ]
-   }
-   ```
-
-4. Whitelist `0.0.0.0/0` in Network Access (for Cloud Functions / Cloud Run access).
-
----
-
-## 👥 Team
+## Team
 
 - Daniel Mortada
+- Ismail Hossain Sohan
+- George Vasile
 
----
+## License
 
-## 📝 License
-
-University project — INFO-H505 Cloud Computing, ULB.
+University project - INFO-H505 Cloud Computing, ULB.
