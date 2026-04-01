@@ -37,6 +37,7 @@ From `.env` + defaults:
 - `UPLOAD_TIMEOUT_SECONDS=180` (UI default)
 - `STATUS_POLL_INTERVAL_SECONDS=4` (UI default)
 - `STATUS_REQUEST_TIMEOUT_SECONDS=15` (UI default)
+- `HISTORY_REQUEST_TIMEOUT_SECONDS=15` (UI default)
 
 ## 2) System Flow (Detailed)
 
@@ -150,6 +151,15 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
    - `answer`
    - deduplicated `sources` list
 
+### F) Session history rehydration (`GET /history` + UI `sid`)
+
+1. Streamlit keeps a stable `session_id` and mirrors it to `?sid=...`.
+2. On page load, UI calls `GET /history?session_id=<sid>` once.
+3. Chat API reads `MongoDBChatMessageHistory` from `chat_history`.
+4. API normalizes message roles to `user` / `assistant` and returns a JSON list.
+5. UI rehydrates the conversation before rendering chat messages.
+6. If URL `sid` changes or is absent, UI intentionally starts a new session.
+
 ## 4) Data Model (Current)
 
 ### MongoDB `context` document (effective shape)
@@ -247,8 +257,8 @@ gcloud functions deploy smartstudy-cleanup \
 
 ## 6) Current Caveats and Planned Improvements
 
-- Frontend chat transcript is in Streamlit session state and resets on full refresh.
-- Backend chat memory persists in Mongo by `session_id`; a stable browser-side session key can fully bridge refresh continuity.
+- Session continuity is URL-session based (`sid`) rather than account-based identity.
+- Anyone with the same `sid` can view the same session history; authentication is not enforced yet.
 - Source list may include multiple active files if user uploads several PDFs; expected behavior.
 - Readiness polling is inferred from indexed chunk presence and storage checks, so status is near-real-time but event-driven.
 - Optional future hardening:

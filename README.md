@@ -2,7 +2,7 @@
 
 > INFO-H505 Cloud Computing Project - ULB 2025-2026
 
-SmartStudy is a cloud-native study assistant for lecture PDFs. A student uploads a PDF in the Streamlit UI, the Chat API stores it in Google Cloud Storage through `POST /upload`, GCS events trigger ingestion and cleanup functions, and the chat backend answers questions with grounded citations from MongoDB Atlas.
+SmartStudy is a cloud-native study assistant for lecture PDFs. A student batch-uploads PDFs in the Streamlit UI, the Chat API stores them in Google Cloud Storage through `POST /upload`, GCS events trigger ingestion and cleanup functions, and the chat backend answers questions with grounded citations from MongoDB Atlas.
 
 ## Architecture
 
@@ -165,7 +165,8 @@ gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --proj
 2. Confirm the file appears in GCS.
 3. Watch the ingest function logs.
 4. Ask a question in the UI and verify the answer includes sources.
-5. Delete the PDF from GCS and confirm the cleanup function removes the vectors.
+5. Refresh the UI and confirm the same `sid` URL keeps the same chat history.
+6. Delete a PDF from GCS and confirm the cleanup function removes its vectors.
 
 Useful commands:
 
@@ -210,7 +211,8 @@ Create a vector search index named `vector_index` on the `context` collection. T
 - Uploads are handled by the Chat API through `/upload`, not by direct browser-to-GCS writes.
 - Ingestion is event-driven and reproducible: a finalized object in GCS is what starts PDF processing.
 - Cleanup is also event-driven: deleting a PDF from GCS removes its stored vectors.
-- The Streamlit chat transcript is still session-based, so a full browser refresh resets the visible UI state.
+- Chat memory is persisted in MongoDB and restored on refresh using session-aware history hydration (`sid` + `GET /history`).
+- Opening the app with a new or missing `sid` starts a new session by design.
 
 ## Team
 

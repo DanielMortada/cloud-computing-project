@@ -67,6 +67,7 @@ flowchart LR
 - Vector search on MongoDB Atlas.
 - Grounded Q&A with source citations.
 - Quiz command support in tutor prompt (`/quiz`).
+- Conversation memory restored on refresh for the same session URL (`sid`).
 - Automatic cleanup of vectors when PDFs are deleted from GCS.
 
 ## Why This Architecture Is Good for the Project
@@ -87,11 +88,11 @@ flowchart LR
 
 ## Current Limitations (Known)
 
-- Refreshing the page resets the local UI chat transcript (backend history exists but is not fully rehydrated into UI yet).
+- Session continuity depends on keeping the same `sid` in the URL; opening a new session starts empty history.
 - If multiple PDFs are active, citation lists may show multiple files by design.
+- User authentication and strict per-user document isolation are not enabled yet.
 
 ## Next Evolution (When Needed)
 
-- Persistent frontend session identity across refresh.
 - Better document management UI (list/delete/select active docs).
-- Per-user document isolation and filtering.
+- Authenticated user identity mapped to session/document scope.
