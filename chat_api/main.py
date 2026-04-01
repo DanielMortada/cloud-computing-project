@@ -11,8 +11,11 @@ Deployed to Cloud Run (or run locally for development).
 """
 
 import os
+import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from google.cloud import storage
+from werkzeug.utils import secure_filename
 
 from langchain_google_vertexai import ChatVertexAI, VertexAIEmbeddings
 from langchain_mongodb import MongoDBAtlasVectorSearch
@@ -34,6 +37,9 @@ EMBEDDING_MODEL = os.environ.get("VERTEX_AI_EMBEDDING_MODEL", "text-embedding-00
 LLM_MODEL = os.environ.get("VERTEX_AI_LLM_MODEL", "gemini-2.5-flash")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 GCP_REGION = os.environ.get("GCP_REGION", "europe-west1")
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "")
+GCS_UPLOAD_PREFIX = os.environ.get("GCS_UPLOAD_PREFIX", "uploads")
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "25"))
 PORT = int(os.environ.get("PORT", 8080))
 
 # ---------------------------------------------------------------------------
@@ -65,7 +71,65 @@ Context from the lecture notes:
 # ---------------------------------------------------------------------------
 mongo_client: MongoClient | None = None
 vector_store: MongoDBAtlasVectorSearch | None = None
+storage_client: storage.Client | None = None
 rag_chain = None
+
+
+def _normalize_page_display(raw_page):
+    """Normalize page metadata to a human-readable 1-based page string."""
+    if raw_page is None:
+        return "?"
+
+    if isinstance(raw_page, bool):
+        return "?"
+
+    if isinstance(raw_page, int):
+        # PyPDFLoader page metadata is usually zero-based.
+        return str(raw_page + 1 if raw_page >= 0 else raw_page)
+
+    if isinstance(raw_page, float):
+        page_int = int(raw_page)
+        return str(page_int + 1 if page_int >= 0 else page_int)
+
+    if isinstance(raw_page, str):
+        trimmed = raw_page.strip()
+        if not trimmed:
+            return "?"
+        if trimmed.isdigit():
+            page_int = int(trimmed)
+            return str(page_int + 1 if page_int >= 0 else page_int)
+        return trimmed
+
+    return "?"
+
+
+def _extract_source_and_page(doc):
+    """Support both legacy nested metadata and flattened metadata fields."""
+    metadata = doc.metadata or {}
+    nested = metadata.get("metadata", {})
+    if not isinstance(nested, dict):
+        nested = {}
+
+    source = (
+        metadata.get("source")
+        or metadata.get("filename")
+        or nested.get("source")
+        or nested.get("filename")
+        or "unknown"
+    )
+
+    # Prefer explicit pageNumber when available (new ingestion format).
+    if metadata.get("pageNumber") is not None:
+        page_display = str(metadata.get("pageNumber"))
+    else:
+        raw_page = (
+            metadata.get("page")
+            if metadata.get("page") is not None
+            else nested.get("page")
+        )
+        page_display = _normalize_page_display(raw_page)
+
+    return source, page_display
 
 
 def get_mongo_client() -> MongoClient:
@@ -73,6 +137,17 @@ def get_mongo_client() -> MongoClient:
     if mongo_client is None:
         mongo_client = MongoClient(MONGODB_URI)
     return mongo_client
+
+
+def get_storage_client() -> storage.Client:
+    """Return a shared Google Cloud Storage client."""
+    global storage_client
+    if storage_client is None:
+        if GCP_PROJECT_ID:
+            storage_client = storage.Client(project=GCP_PROJECT_ID)
+        else:
+            storage_client = storage.Client()
+    return storage_client
 
 
 def get_vector_store() -> MongoDBAtlasVectorSearch:
@@ -172,18 +247,17 @@ def chat():
         vs = get_vector_store()
         docs = vs.similarity_search(question, k=5)
 
-        context_text = "\n\n---\n\n".join(
-            f"[Source: {doc.metadata.get('source', 'unknown')}, "
-            f"Page: {doc.metadata.get('page', '?')}]\n{doc.page_content}"
-            for doc in docs
-        )
+        context_parts = []
+        source_labels = set()
+        for doc in docs:
+            source, page = _extract_source_and_page(doc)
+            context_parts.append(
+                f"[Source: {source}, Page: {page}]\n{doc.page_content}"
+            )
+            source_labels.add(f"{source} (p.{page})")
 
-        sources = list(
-            {
-                f"{doc.metadata.get('source', 'unknown')} (p.{doc.metadata.get('page', '?')})"
-                for doc in docs
-            }
-        )
+        context_text = "\n\n---\n\n".join(context_parts)
+        sources = sorted(source_labels)
 
         # 2. Run the RAG chain with conversation history
         chain = build_rag_chain()
@@ -197,6 +271,63 @@ def chat():
     except Exception as e:
         print(f"❌ Error in /chat: {e}")
         return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    """
+    POST /upload (multipart/form-data)
+    Body: file=<pdf>
+    Returns: upload metadata and processing status hint.
+    """
+    if not GCS_BUCKET_NAME:
+        return jsonify({"error": "GCS_BUCKET_NAME is not configured"}), 500
+
+    uploaded_file = request.files.get("file")
+    if uploaded_file is None:
+        return jsonify({"error": "No file provided. Use form field name 'file'."}), 400
+
+    original_name = (uploaded_file.filename or "").strip()
+    if not original_name:
+        return jsonify({"error": "Empty filename."}), 400
+
+    safe_name = secure_filename(original_name)
+    if not safe_name or not safe_name.lower().endswith(".pdf"):
+        return jsonify({"error": "Only PDF files are supported."}), 400
+
+    file_bytes = uploaded_file.read()
+    if not file_bytes:
+        return jsonify({"error": "Uploaded file is empty."}), 400
+
+    max_upload_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    if len(file_bytes) > max_upload_bytes:
+        return jsonify({"error": f"File too large. Max size is {MAX_UPLOAD_MB} MB."}), 413
+
+    unique_suffix = uuid.uuid4().hex[:8]
+    base_name, ext = os.path.splitext(safe_name)
+    object_name = f"{base_name}-{unique_suffix}{ext}"
+    if GCS_UPLOAD_PREFIX:
+        object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{object_name}"
+
+    try:
+        client = get_storage_client()
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(object_name)
+        blob.upload_from_string(file_bytes, content_type="application/pdf")
+
+        return jsonify(
+            {
+                "status": "uploaded",
+                "message": "PDF uploaded. Ingestion will start automatically.",
+                "bucket": GCS_BUCKET_NAME,
+                "object_name": object_name,
+                "source_name": os.path.basename(object_name),
+                "size_bytes": len(file_bytes),
+            }
+        )
+    except Exception as e:
+        print(f"? Error in /upload: {e}")
+        return jsonify({"error": "Upload failed", "detail": str(e)}), 500
 
 
 @app.route("/history", methods=["DELETE"])
