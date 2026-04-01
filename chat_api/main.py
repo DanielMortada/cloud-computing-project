@@ -12,7 +12,9 @@ Deployed to Cloud Run (or run locally for development).
 
 import os
 import uuid
-from flask import Flask, request, jsonify
+from datetime import datetime, timezone
+
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from google.cloud import storage
 from werkzeug.utils import secure_filename
@@ -150,6 +152,12 @@ def get_storage_client() -> storage.Client:
     return storage_client
 
 
+def get_context_collection():
+    """Return the MongoDB collection that stores document chunks."""
+    client = get_mongo_client()
+    return client[MONGODB_DB_NAME][MONGODB_COLLECTION]
+
+
 def get_vector_store() -> MongoDBAtlasVectorSearch:
     """Return the LangChain vector store backed by MongoDB Atlas."""
     global vector_store
@@ -159,8 +167,7 @@ def get_vector_store() -> MongoDBAtlasVectorSearch:
             project=GCP_PROJECT_ID,
             location=GCP_REGION,
         )
-        client = get_mongo_client()
-        collection = client[MONGODB_DB_NAME][MONGODB_COLLECTION]
+        collection = get_context_collection()
         vector_store = MongoDBAtlasVectorSearch(
             collection=collection,
             embedding=embeddings,
@@ -214,6 +221,124 @@ def build_rag_chain():
         history_messages_key="history",
     )
     return rag_chain
+
+
+def build_upload_object_name(original_filename: str) -> str:
+    """Create a unique object path for an uploaded PDF."""
+    safe_name = secure_filename(original_filename)
+    unique_suffix = uuid.uuid4().hex[:8]
+    base_name, ext = os.path.splitext(safe_name)
+    object_name = f"{base_name}-{unique_suffix}{ext}"
+    if GCS_UPLOAD_PREFIX:
+        object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{object_name}"
+    return object_name
+
+
+def _document_source_filter(object_name: str) -> dict:
+    """Match both current and legacy source field layouts."""
+    return {
+        "$or": [
+            {"source": object_name},
+            {"metadata.source": object_name},
+        ]
+    }
+
+
+def get_document_status(object_name: str, source_name: str | None = None) -> dict:
+    """Return ingestion readiness for a previously uploaded PDF."""
+    checked_at = datetime.now(timezone.utc).isoformat()
+    clean_object_name = (object_name or "").strip()
+    label = source_name or os.path.basename(clean_object_name)
+
+    if not clean_object_name:
+        return {
+            "object_name": "",
+            "source_name": label or "unknown.pdf",
+            "status": "invalid",
+            "ready": False,
+            "chunk_count": 0,
+            "exists_in_storage": None,
+            "checked_at": checked_at,
+            "message": "Missing object_name.",
+        }
+
+    collection = get_context_collection()
+    chunk_count = collection.count_documents(_document_source_filter(clean_object_name))
+
+    exists_in_storage = None
+    if GCS_BUCKET_NAME:
+        try:
+            bucket = get_storage_client().bucket(GCS_BUCKET_NAME)
+            exists_in_storage = bucket.blob(clean_object_name).exists()
+        except Exception as exc:
+            print(f"Warning: could not verify storage status for {clean_object_name}: {exc}")
+
+    if chunk_count > 0:
+        status = "ready"
+        message = "Ingestion complete. Ready for chat."
+        ready = True
+    elif exists_in_storage is False:
+        status = "not_found"
+        message = "File is not present in storage."
+        ready = False
+    else:
+        status = "processing"
+        message = "Upload received. Waiting for ingestion to finish."
+        ready = False
+
+    return {
+        "object_name": clean_object_name,
+        "source_name": label or os.path.basename(clean_object_name),
+        "status": status,
+        "ready": ready,
+        "chunk_count": chunk_count,
+        "exists_in_storage": exists_in_storage,
+        "checked_at": checked_at,
+        "message": message,
+    }
+
+
+def parse_status_documents(payload: dict) -> list[dict]:
+    """Normalize the status endpoint request payload."""
+    documents = payload.get("documents")
+    if documents is None:
+        single_object_name = payload.get("object_name") or payload.get("source")
+        if single_object_name:
+            documents = [
+                {
+                    "object_name": single_object_name,
+                    "source_name": payload.get("source_name"),
+                }
+            ]
+
+    if not isinstance(documents, list) or not documents:
+        raise ValueError("Provide a non-empty 'documents' list or an 'object_name'.")
+
+    normalized_documents: list[dict] = []
+    for document in documents:
+        if isinstance(document, str):
+            normalized_documents.append(
+                {"object_name": document, "source_name": os.path.basename(document)}
+            )
+            continue
+
+        if not isinstance(document, dict):
+            normalized_documents.append({"object_name": "", "source_name": "unknown.pdf"})
+            continue
+
+        normalized_documents.append(
+            {
+                "object_name": (
+                    document.get("object_name")
+                    or document.get("source")
+                    or document.get("source_path")
+                    or ""
+                ),
+                "source_name": document.get("source_name"),
+            }
+        )
+
+    return normalized_documents
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +428,8 @@ def upload():
     if len(file_bytes) > max_upload_bytes:
         return jsonify({"error": f"File too large. Max size is {MAX_UPLOAD_MB} MB."}), 413
 
-    unique_suffix = uuid.uuid4().hex[:8]
-    base_name, ext = os.path.splitext(safe_name)
-    object_name = f"{base_name}-{unique_suffix}{ext}"
-    if GCS_UPLOAD_PREFIX:
-        object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{object_name}"
+    object_name = build_upload_object_name(safe_name)
+    upload_id = uuid.uuid4().hex
 
     try:
         client = get_storage_client()
@@ -319,15 +441,65 @@ def upload():
             {
                 "status": "uploaded",
                 "message": "PDF uploaded. Ingestion will start automatically.",
+                "upload_id": upload_id,
                 "bucket": GCS_BUCKET_NAME,
                 "object_name": object_name,
                 "source_name": os.path.basename(object_name),
+                "original_name": original_name,
                 "size_bytes": len(file_bytes),
+                "status_poll_path": "/documents/status",
+                "status_poll_after_seconds": 4,
             }
         )
     except Exception as e:
         print(f"? Error in /upload: {e}")
         return jsonify({"error": "Upload failed", "detail": str(e)}), 500
+
+
+@app.route("/documents/status", methods=["POST"])
+def document_status():
+    """
+    POST /documents/status
+    Body: { "documents": [{ "object_name": "...", "source_name": "..." }] }
+    Returns readiness for each uploaded document.
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        documents = parse_status_documents(body)
+        statuses = [
+            get_document_status(
+                object_name=document["object_name"],
+                source_name=document.get("source_name"),
+            )
+            for document in documents
+        ]
+
+        ready_count = sum(1 for item in statuses if item["ready"])
+        processing_count = sum(1 for item in statuses if item["status"] == "processing")
+        not_found_count = sum(1 for item in statuses if item["status"] == "not_found")
+        invalid_count = sum(1 for item in statuses if item["status"] == "invalid")
+
+        return jsonify(
+            {
+                "documents": statuses,
+                "summary": {
+                    "total": len(statuses),
+                    "ready": ready_count,
+                    "processing": processing_count,
+                    "not_found": not_found_count,
+                    "invalid": invalid_count,
+                    "all_ready": ready_count == len(statuses) and len(statuses) > 0,
+                },
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": "Invalid status request", "detail": str(exc)}), 400
+    except Exception as exc:
+        print(f"❌ Error in /documents/status: {exc}")
+        return (
+            jsonify({"error": "Internal server error", "detail": str(exc)}),
+            500,
+        )
 
 
 @app.route("/history", methods=["DELETE"])

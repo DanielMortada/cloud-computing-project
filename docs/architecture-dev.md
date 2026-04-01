@@ -35,6 +35,8 @@ From `.env` + defaults:
 - `GCS_UPLOAD_PREFIX=uploads` (default)
 - `MAX_UPLOAD_MB=25` (default)
 - `UPLOAD_TIMEOUT_SECONDS=180` (UI default)
+- `STATUS_POLL_INTERVAL_SECONDS=4` (UI default)
+- `STATUS_REQUEST_TIMEOUT_SECONDS=15` (UI default)
 
 ## 2) System Flow (Detailed)
 
@@ -55,6 +57,11 @@ flowchart TD
     GCS -->|A1. Delete event| CLEAN[Cloud Function Gen2<br/>smartstudy-cleanup]
     CLEAN -->|A2. Delete vectors by source| CTX
 
+    UI -->|B1. Check readiness| STAT[/POST /documents/status/]
+    STAT -->|B2. Count indexed chunks| CTX
+    CTX -->|B3. Return status summary| STAT
+    STAT -->|B4. Update status cards| UI
+
     UI -->|8. Ask question| CHAT[/POST /chat/]
     CHAT -->|9. Receive chat request| API
     API -->|10. Vector search k=5| CTX
@@ -70,7 +77,7 @@ flowchart TD
     classDef data fill:#FCE8E6,stroke:#EA4335,color:#C5221F,stroke-width:1px;
 
     class U user;
-    class UI,API,UP,CHAT service;
+    class UI,API,UP,CHAT,STAT service;
     class INGEST,CLEAN,CHUNKS,EMB,LLM compute;
     class GCS,CTX,HIST data;
 ```
@@ -79,19 +86,30 @@ flowchart TD
 
 ### A) Upload path (user-triggered)
 
-1. User uploads PDF from Streamlit sidebar.
-2. Streamlit sends `multipart/form-data` to `POST /upload` on Chat API.
+1. User selects one or more PDFs in the Streamlit sidebar.
+2. Streamlit submits the selected files as a batch (one request per file) to `POST /upload`.
 3. Chat API validates:
    - file present
    - filename non-empty
    - extension `.pdf`
    - size <= `MAX_UPLOAD_MB`
-4. Chat API writes object to:
+4. Chat API writes each object to:
    - `gs://smartstudy-pdfs-491919/uploads/<secure_name>-<uuid8>.pdf`
-5. GCS emits `object.finalized` event.
-6. `smartstudy-ingest` executes ingestion pipeline.
+5. Chat API returns upload metadata including `object_name`, `source_name`, and `upload_id`.
+6. GCS emits `object.finalized` events.
+7. `smartstudy-ingest` executes ingestion per uploaded object.
 
-### B) Ingestion path (`smartstudy-ingest`)
+### B) Readiness status path (`POST /documents/status`)
+
+1. Streamlit stores uploaded `object_name` values in session state.
+2. While any file is pending, UI polls `POST /documents/status` at `STATUS_POLL_INTERVAL_SECONDS`.
+3. Chat API checks readiness per object by:
+   - counting matching chunks in Mongo `context`
+   - optionally checking object existence in GCS
+4. Chat API returns per-document status (`ready`, `processing`, `not_found`, `invalid`) plus summary counts.
+5. UI updates each document card in real time until ingestion is complete.
+
+### C) Ingestion path (`smartstudy-ingest`)
 
 Pipeline in `cloud_function/main.py -> process_pdf`:
 
@@ -107,7 +125,7 @@ Pipeline in `cloud_function/main.py -> process_pdf`:
 7. Reconcile stale vectors against current bucket content:
    - remove docs whose `source` no longer exists in GCS.
 
-### C) Delete-sync path (`smartstudy-cleanup`)
+### D) Delete-sync path (`smartstudy-cleanup`)
 
 Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 
@@ -118,7 +136,7 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 4. If truly deleted:
    - `delete_many` vectors where `source` or `metadata.source` matches blob path.
 
-### D) Chat path (`POST /chat`)
+### E) Chat path (`POST /chat`)
 
 1. Read user question and `session_id`.
 2. Retrieve top-k (`k=5`) context chunks from Mongo vector index.
@@ -171,6 +189,18 @@ gcloud functions describe smartstudy-ingest --gen2 --region=europe-west1 --proje
 gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --project=smart-study-491919
 ```
 
+### Check document readiness via API
+
+```bash
+curl -X POST "https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app/documents/status" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "documents": [
+      { "object_name": "uploads/example-a1b2c3d4.pdf" }
+    ]
+  }'
+```
+
 ### Trigger ingestion manually
 
 ```bash
@@ -220,7 +250,8 @@ gcloud functions deploy smartstudy-cleanup \
 - Frontend chat transcript is in Streamlit session state and resets on full refresh.
 - Backend chat memory persists in Mongo by `session_id`; a stable browser-side session key can fully bridge refresh continuity.
 - Source list may include multiple active files if user uploads several PDFs; expected behavior.
+- Readiness polling is inferred from indexed chunk presence and storage checks, so status is near-real-time but event-driven.
 - Optional future hardening:
   - add document ownership filtering
-  - add ingestion status tracking collection
+  - add a dedicated documents-status collection for richer pipeline states
   - migrate deprecated embedding wrapper if required by future LangChain versions
