@@ -41,6 +41,7 @@
 ```
 
 **Data flow:**
+
 1. Student uploads a PDF to the GCS bucket.
 2. The upload triggers a **Cloud Function** that extracts text, chunks it,
    generates vector embeddings (Vertex AI), and stores them in **MongoDB Atlas**.
@@ -69,7 +70,6 @@ cloud-computing-project/
 │   ├── requirements.txt     #   Python dependencies
 │   └── Dockerfile           #   Container for Cloud Run
 │
-├── lab_code/                # (Reference) Original lab code from Google Skills
 ├── .env.example             # Template for environment variables
 ├── .gitignore
 ├── project-context.md       # Project instructions (markdown)
@@ -89,6 +89,7 @@ cloud-computing-project/
 | GCP project with billing | Use the $50 student coupon |
 
 **GCP APIs to enable:**
+
 ```bash
 gcloud services enable \
   cloudfunctions.googleapis.com \
@@ -183,6 +184,7 @@ gcloud functions logs read smartstudy-ingest --region=europe-west1
 ## 🧪 Local Development
 
 To run the Chat API locally:
+
 ```bash
 cd chat_api
 pip install -r requirements.txt
@@ -191,6 +193,7 @@ python main.py
 ```
 
 To run the Streamlit UI locally:
+
 ```bash
 cd streamlit_app
 pip install -r requirements.txt
@@ -219,6 +222,7 @@ streamlit run app.py
    - `context` — stores document chunks + vector embeddings
    - `chat_history` — stores conversation messages
 3. Create a **Vector Search Index** on the `context` collection named `vector_index`:
+
    ```json
    {
      "fields": [
@@ -231,6 +235,7 @@ streamlit run app.py
      ]
    }
    ```
+
 4. Whitelist `0.0.0.0/0` in Network Access (for Cloud Functions / Cloud Run access).
 
 ---
