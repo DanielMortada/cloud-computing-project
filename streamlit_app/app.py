@@ -9,6 +9,7 @@ Deployed on Cloud Run alongside the Chat API.
 import html
 import os
 import uuid
+from textwrap import dedent
 
 import requests
 import streamlit as st
@@ -22,6 +23,9 @@ STATUS_POLL_INTERVAL_SECONDS = int(os.environ.get("STATUS_POLL_INTERVAL_SECONDS"
 STATUS_REQUEST_TIMEOUT_SECONDS = int(
     os.environ.get("STATUS_REQUEST_TIMEOUT_SECONDS", "15")
 )
+HISTORY_REQUEST_TIMEOUT_SECONDS = int(
+    os.environ.get("HISTORY_REQUEST_TIMEOUT_SECONDS", "15")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -34,13 +38,52 @@ st.set_page_config(
 )
 
 
+def normalize_chat_role(raw_role: str) -> str:
+    """Map backend message roles to Streamlit chat roles."""
+    role = (raw_role or "").strip().lower()
+    if role in {"human", "user"}:
+        return "user"
+    if role in {"ai", "assistant"}:
+        return "assistant"
+    if role == "system":
+        return "assistant"
+    return "assistant"
+
+
+def read_query_session_id() -> str:
+    """Read the session id from query params when available."""
+    raw_value = st.query_params.get("sid", "")
+    if isinstance(raw_value, list):
+        raw_value = raw_value[0] if raw_value else ""
+    return str(raw_value).strip()
+
+
+def sync_query_session_id(session_id: str):
+    """Keep the browser URL aligned with the active session id."""
+    if read_query_session_id() != session_id:
+        st.query_params["sid"] = session_id
+
+
 def init_session_state():
     """Initialize Streamlit session state used by the app."""
-    if "session_id" not in st.session_state:
-        st.session_state.session_id = str(uuid.uuid4())
-
     if "messages" not in st.session_state:
         st.session_state.messages = []
+
+    if "history_hydrated" not in st.session_state:
+        st.session_state.history_hydrated = False
+
+    if "history_error" not in st.session_state:
+        st.session_state.history_error = None
+
+    query_session_id = read_query_session_id()
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = query_session_id or str(uuid.uuid4())
+    elif query_session_id and query_session_id != st.session_state.session_id:
+        # User opened a different session id from URL.
+        st.session_state.session_id = query_session_id
+        st.session_state.messages = []
+        st.session_state.history_hydrated = False
+        st.session_state.history_error = None
 
     if "uploaded_documents" not in st.session_state:
         st.session_state.uploaded_documents = []
@@ -53,6 +96,8 @@ def init_session_state():
 
     if "uploader_key" not in st.session_state:
         st.session_state.uploader_key = 0
+
+    sync_query_session_id(st.session_state.session_id)
 
 
 def render_theme():
@@ -452,6 +497,46 @@ def safe_json(response: requests.Response) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def hydrate_chat_history_once():
+    """Load persisted chat history for this session exactly once per page load."""
+    if st.session_state.history_hydrated:
+        return
+
+    try:
+        response = requests.get(
+            f"{CHAT_API_URL}/history",
+            params={"session_id": st.session_state.session_id},
+            timeout=HISTORY_REQUEST_TIMEOUT_SECONDS,
+        )
+        data = safe_json(response)
+        if response.ok:
+            hydrated_messages = []
+            for item in data.get("messages", []):
+                if not isinstance(item, dict):
+                    continue
+                content = str(item.get("content", ""))
+                if not content:
+                    continue
+                role = normalize_chat_role(str(item.get("role", "")))
+                hydrated_messages.append({"role": role, "content": content})
+            st.session_state.messages = hydrated_messages
+            st.session_state.history_error = None
+        else:
+            detail = data.get("detail")
+            error = data.get("error", "History restoration failed.")
+            st.session_state.history_error = (
+                f"{error} ({detail})" if detail else error
+            )
+    except requests.exceptions.ConnectionError:
+        st.session_state.history_error = (
+            "Cannot reach the Chat API history endpoint right now."
+        )
+    except Exception as exc:
+        st.session_state.history_error = f"History load error: {exc}"
+    finally:
+        st.session_state.history_hydrated = True
+
+
 def merge_uploaded_documents(new_documents: list[dict]):
     """Prepend newly uploaded documents and keep object names unique."""
     if not new_documents:
@@ -678,14 +763,16 @@ def build_document_card(document: dict) -> str:
 
     meta_text = " | ".join(meta_bits) if meta_bits else "Awaiting status refresh."
 
-    return f"""
+    return dedent(
+        f"""
         <article class="ss-doc-card">
             <span class="ss-doc-status ss-status-{html.escape(status)}">{status_label}</span>
             <h4 class="ss-doc-name">{html.escape(document.get("source_name", "Untitled PDF"))}</h4>
             <p class="ss-doc-detail">{html.escape(detail)}</p>
             <p class="ss-doc-meta">{html.escape(meta_text)}</p>
         </article>
-    """
+        """
+    ).strip()
 
 
 def render_document_status_panel():
@@ -731,11 +818,13 @@ def render_document_status_panel():
 
     cards = "".join(build_document_card(document) for document in documents)
     st.markdown(
-        f"""
+        dedent(
+            f"""
         <section class="ss-section-shell">
             <div class="ss-doc-grid">{cards}</div>
         </section>
-        """,
+            """
+        ).strip(),
         unsafe_allow_html=True,
     )
 
@@ -844,13 +933,17 @@ def render_sidebar():
             else:
                 st.error(feedback["message"])
 
+        if st.session_state.history_error:
+            st.info(st.session_state.history_error)
+
         st.divider()
 
         if st.button("Clear chat history", use_container_width=True):
+            old_session_id = st.session_state.session_id
             try:
                 requests.delete(
                     f"{CHAT_API_URL}/history",
-                    params={"session_id": st.session_state.session_id},
+                    params={"session_id": old_session_id},
                     timeout=10,
                 )
             except Exception:
@@ -858,6 +951,9 @@ def render_sidebar():
 
             st.session_state.messages = []
             st.session_state.session_id = str(uuid.uuid4())
+            sync_query_session_id(st.session_state.session_id)
+            st.session_state.history_hydrated = True
+            st.session_state.history_error = None
             st.session_state.upload_feedback = None
             st.rerun()
 
@@ -867,8 +963,9 @@ def render_sidebar():
 def render_chat_history():
     """Render the conversation history."""
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        role = normalize_chat_role(msg.get("role", "assistant"))
+        with st.chat_message(role):
+            st.markdown(msg.get("content", ""))
 
 
 def handle_chat_input():
@@ -920,6 +1017,7 @@ def handle_chat_input():
 
 
 init_session_state()
+hydrate_chat_history_once()
 render_theme()
 render_sidebar()
 render_hero()

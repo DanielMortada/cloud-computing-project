@@ -188,6 +188,56 @@ def get_session_history(session_id: str) -> MongoDBChatMessageHistory:
     )
 
 
+def _normalize_history_role(raw_role: str) -> str:
+    """Map backend role labels to Streamlit chat roles."""
+    role = (raw_role or "").strip().lower()
+    if role in {"human", "user"}:
+        return "user"
+    if role in {"ai", "assistant"}:
+        return "assistant"
+    if role == "system":
+        return "system"
+    return "assistant"
+
+
+def _normalize_history_content(raw_content) -> str:
+    """Convert stored message payloads to plain text."""
+    if isinstance(raw_content, str):
+        return raw_content
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, list):
+        parts = []
+        for item in raw_content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(str(text))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(raw_content)
+
+
+def serialize_session_history(session_id: str) -> dict:
+    """Return a JSON-friendly view of the stored chat history."""
+    history = get_session_history(session_id)
+    messages = []
+
+    for message in history.messages:
+        raw_role = getattr(message, "type", None) or getattr(message, "role", None) or ""
+        raw_content = getattr(message, "content", "")
+        role = _normalize_history_role(str(raw_role))
+        content = _normalize_history_content(raw_content)
+        messages.append({"role": role, "content": content})
+
+    return {
+        "session_id": session_id,
+        "messages": messages,
+        "count": len(messages),
+    }
+
+
 def build_rag_chain():
     """Build the LangChain LCEL chain: retrieval → prompt → LLM → output."""
     global rag_chain
@@ -504,11 +554,25 @@ def document_status():
 
 @app.route("/history", methods=["DELETE"])
 def clear_history():
-    """DELETE /history?session_id=... — Clear chat history for a session."""
+    """DELETE /history?session_id=... - Clear chat history for a session."""
     session_id = request.args.get("session_id", "default")
     history = get_session_history(session_id)
     history.clear()
     return jsonify({"status": "cleared", "session_id": session_id})
+
+
+@app.route("/history", methods=["GET"])
+def read_history():
+    """GET /history?session_id=... - Return stored chat messages for a session."""
+    session_id = request.args.get("session_id", "").strip()
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    try:
+        return jsonify(serialize_session_history(session_id))
+    except Exception as exc:
+        print(f"❌ Error in GET /history: {exc}")
+        return jsonify({"error": "Internal server error", "detail": str(exc)}), 500
 
 
 # ---------------------------------------------------------------------------
