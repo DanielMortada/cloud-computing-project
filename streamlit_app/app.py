@@ -34,7 +34,8 @@ HISTORY_REQUEST_TIMEOUT_SECONDS = int(
 st.set_page_config(
     page_title="SmartStudy",
     page_icon="S",
-    layout="centered",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 
@@ -106,381 +107,236 @@ def render_theme():
         """
         <style>
         :root {
-            --ss-bg: #f6f8fc;
-            --ss-card: rgba(255, 255, 255, 0.88);
-            --ss-card-strong: #ffffff;
-            --ss-ink: #1f1f1f;
-            --ss-muted: #5f6368;
-            --ss-blue: #4285f4;
-            --ss-red: #ea4335;
-            --ss-yellow: #fbbc05;
-            --ss-green: #34a853;
-            --ss-border: rgba(66, 133, 244, 0.12);
-            --ss-shadow: 0 18px 45px rgba(60, 64, 67, 0.12);
-            --ss-radius: 24px;
+            --ss-accent: #5865F2;
+            --ss-accent-light: rgba(88, 101, 242, 0.1);
+            --ss-ink: #111827;
+            --ss-muted: #6b7280;
+            --ss-bg: #fafafa;
+            --ss-card: #ffffff;
+            --ss-border: #e5e7eb;
+            --ss-green: #16a34a;
+            --ss-green-bg: rgba(22, 163, 74, 0.1);
+            --ss-red: #dc2626;
+            --ss-red-bg: rgba(220, 38, 38, 0.1);
+            --ss-shadow-sm: 0 1px 3px rgba(0,0,0,0.07), 0 4px 12px rgba(0,0,0,0.04);
+            --ss-radius: 12px;
         }
 
         .stApp {
-            background:
-                radial-gradient(circle at top left, rgba(66, 133, 244, 0.14), transparent 30%),
-                radial-gradient(circle at top right, rgba(251, 188, 5, 0.18), transparent 28%),
-                linear-gradient(180deg, #f7faff 0%, #f6f8fc 45%, #eef3fb 100%);
+            background: var(--ss-bg);
             color: var(--ss-ink);
         }
 
-        [data-testid="stHeader"] {
-            background: transparent;
-        }
+        [data-testid="stHeader"] { background: transparent; }
 
         [data-testid="stSidebar"] {
-            background:
-                linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 248, 255, 0.96));
-            border-right: 1px solid rgba(66, 133, 244, 0.08);
-        }
-
-        [data-testid="stSidebar"] > div:first-child {
-            padding-top: 1.25rem;
-        }
-
-        .ss-hero {
-            position: relative;
-            overflow: hidden;
-            padding: 1.75rem 1.75rem 1.5rem 1.75rem;
-            border-radius: 28px;
-            background:
-                linear-gradient(135deg, rgba(66, 133, 244, 0.96), rgba(74, 112, 241, 0.92) 42%, rgba(52, 168, 83, 0.88) 100%);
-            color: white;
-            box-shadow: 0 22px 60px rgba(66, 133, 244, 0.22);
-            animation: ssRise 0.7s ease-out;
-        }
-
-        .ss-hero::before,
-        .ss-hero::after {
-            content: "";
-            position: absolute;
-            border-radius: 999px;
-            opacity: 0.22;
-            filter: blur(4px);
-        }
-
-        .ss-hero::before {
-            width: 220px;
-            height: 220px;
-            right: -40px;
-            top: -70px;
-            background: rgba(255, 255, 255, 0.42);
-        }
-
-        .ss-hero::after {
-            width: 150px;
-            height: 150px;
-            left: -30px;
-            bottom: -50px;
-            background: rgba(251, 188, 5, 0.45);
-        }
-
-        .ss-eyebrow {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.45rem;
-            padding: 0.38rem 0.7rem;
-            border-radius: 999px;
-            background: rgba(255, 255, 255, 0.16);
-            font-size: 0.78rem;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            backdrop-filter: blur(10px);
-        }
-
-        .ss-hero h1 {
-            margin: 0.95rem 0 0.35rem 0;
-            font-size: 2.35rem;
-            line-height: 1.04;
-            font-weight: 700;
-            letter-spacing: -0.04em;
-        }
-
-        .ss-hero p {
-            margin: 0;
-            max-width: 38rem;
-            font-size: 1rem;
-            line-height: 1.6;
-            color: rgba(255, 255, 255, 0.88);
-        }
-
-        .ss-summary-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 0.9rem;
-            margin-top: 1.1rem;
-        }
-
-        .ss-summary-card,
-        .ss-empty-state,
-        .ss-section-shell,
-        .ss-sidebar-card {
-            border-radius: var(--ss-radius);
             background: var(--ss-card);
-            border: 1px solid rgba(255, 255, 255, 0.65);
-            box-shadow: var(--ss-shadow);
-            backdrop-filter: blur(16px);
+            border-right: 1px solid var(--ss-border);
         }
 
-        .ss-summary-card {
-            padding: 1rem 1.05rem;
-            animation: ssRise 0.8s ease-out;
-        }
-
-        .ss-summary-label {
-            font-size: 0.78rem;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: var(--ss-muted);
-        }
-
-        .ss-summary-value {
-            margin-top: 0.15rem;
-            font-size: 1.7rem;
-            line-height: 1.1;
-            font-weight: 700;
-            color: var(--ss-ink);
-        }
-
-        .ss-summary-hint {
-            margin-top: 0.25rem;
-            font-size: 0.92rem;
-            color: var(--ss-muted);
-        }
-
-        .ss-section-shell {
-            padding: 1.2rem;
-            margin-top: 1.1rem;
-            animation: ssRise 0.85s ease-out;
-        }
-
-        .ss-section-title {
+        /* ---- Brand ---- */
+        .ss-brand {
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            gap: 1rem;
-            margin-bottom: 0.9rem;
+            gap: 0.65rem;
+            padding: 0.25rem 0 0.9rem 0;
         }
-
-        .ss-section-title h3 {
+        .ss-brand-icon { font-size: 1.75rem; }
+        .ss-brand-text h2 {
             margin: 0;
             font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--ss-ink);
+            line-height: 1.2;
+        }
+        .ss-brand-text span {
+            font-size: 0.75rem;
+            color: var(--ss-muted);
+            letter-spacing: 0.03em;
+        }
+
+        /* ---- Status badges ---- */
+        .ss-status-badges {
+            display: flex;
+            gap: 0.45rem;
+            flex-wrap: wrap;
+            margin-bottom: 0.5rem;
+        }
+        .ss-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: #f3f4f6;
+            color: var(--ss-muted);
+        }
+        .ss-badge.ready  { background: var(--ss-green-bg); color: var(--ss-green); }
+        .ss-badge.processing { background: var(--ss-accent-light); color: var(--ss-accent); }
+
+        /* ---- Tabs ---- */
+        [data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 0.25rem;
+            border-bottom: 2px solid var(--ss-border);
+        }
+        [data-testid="stTabs"] [data-baseweb="tab"] {
+            font-weight: 600;
+            font-size: 0.95rem;
+            padding: 0.6rem 1.1rem;
+            border-radius: var(--ss-radius) var(--ss-radius) 0 0;
+            color: var(--ss-muted);
+        }
+        [data-testid="stTabs"] [aria-selected="true"] {
+            color: var(--ss-accent);
+            border-bottom: 2px solid var(--ss-accent);
+        }
+
+        /* ---- Chat welcome state ---- */
+        .ss-welcome {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 5rem 1rem 3rem 1rem;
+            text-align: center;
+            gap: 0.65rem;
+        }
+        .ss-welcome-icon { font-size: 3.5rem; }
+        .ss-welcome h2 {
+            margin: 0;
+            font-size: 1.6rem;
+            font-weight: 700;
             color: var(--ss-ink);
         }
-
-        .ss-section-title p {
-            margin: 0.2rem 0 0 0;
+        .ss-welcome p {
+            margin: 0;
             color: var(--ss-muted);
-            font-size: 0.94rem;
+            font-size: 1rem;
+            max-width: 32rem;
+            line-height: 1.6;
+        }
+        .ss-quiz-tip {
+            display: inline-block;
+            padding: 0.35rem 0.85rem;
+            background: var(--ss-accent-light);
+            color: var(--ss-accent);
+            border-radius: 999px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            margin-top: 0.4rem;
         }
 
+        /* ---- Document cards ---- */
+        .ss-doc-card {
+            padding: 1rem 1.1rem;
+            border-radius: var(--ss-radius);
+            background: var(--ss-card);
+            border: 1px solid var(--ss-border);
+            box-shadow: var(--ss-shadow-sm);
+            transition: border-color 160ms ease, box-shadow 160ms ease;
+            animation: ssRise 0.5s ease-out;
+        }
+        .ss-doc-card:hover {
+            border-color: var(--ss-accent);
+            box-shadow: 0 4px 16px rgba(88, 101, 242, 0.12);
+        }
         .ss-doc-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 0.95rem;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 0.9rem;
+            margin-top: 0.75rem;
         }
-
-        .ss-doc-card {
-            position: relative;
-            padding: 1rem;
-            border-radius: 22px;
-            background: rgba(255, 255, 255, 0.96);
-            border: 1px solid var(--ss-border);
-            box-shadow: 0 10px 24px rgba(60, 64, 67, 0.08);
-            transition: transform 180ms ease, box-shadow 180ms ease;
-            animation: ssRise 0.75s ease-out;
-        }
-
-        .ss-doc-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 16px 30px rgba(60, 64, 67, 0.12);
-        }
-
         .ss-doc-status {
             display: inline-flex;
             align-items: center;
-            gap: 0.45rem;
-            padding: 0.35rem 0.65rem;
+            gap: 0.4rem;
+            padding: 0.28rem 0.6rem;
             border-radius: 999px;
-            font-size: 0.78rem;
+            font-size: 0.74rem;
             font-weight: 600;
         }
-
         .ss-doc-status::before {
             content: "";
-            width: 0.55rem;
-            height: 0.55rem;
+            width: 0.5rem;
+            height: 0.5rem;
             border-radius: 999px;
         }
-
-        .ss-status-ready {
-            background: rgba(52, 168, 83, 0.12);
-            color: #0f7a34;
-        }
-
-        .ss-status-ready::before {
-            background: var(--ss-green);
-        }
-
-        .ss-status-processing {
-            background: rgba(66, 133, 244, 0.12);
-            color: #1b66d1;
-        }
-
-        .ss-status-processing::before {
-            background: var(--ss-blue);
-            animation: ssPulse 1.6s infinite;
-        }
-
+        .ss-status-ready    { background: var(--ss-green-bg); color: var(--ss-green); }
+        .ss-status-ready::before { background: var(--ss-green); }
+        .ss-status-processing { background: var(--ss-accent-light); color: var(--ss-accent); }
+        .ss-status-processing::before { background: var(--ss-accent); animation: ssPulse 1.6s infinite; }
         .ss-status-not_found,
-        .ss-status-invalid {
-            background: rgba(234, 67, 53, 0.12);
-            color: #b3261e;
-        }
-
+        .ss-status-invalid  { background: var(--ss-red-bg); color: var(--ss-red); }
         .ss-status-not_found::before,
-        .ss-status-invalid::before {
-            background: var(--ss-red);
-        }
-
+        .ss-status-invalid::before { background: var(--ss-red); }
         .ss-doc-name {
-            margin: 0.8rem 0 0.35rem 0;
-            font-size: 1rem;
-            font-weight: 700;
+            margin: 0.65rem 0 0.25rem 0;
+            font-size: 0.95rem;
+            font-weight: 600;
             color: var(--ss-ink);
             word-break: break-word;
         }
+        .ss-doc-detail { margin: 0; color: var(--ss-muted); font-size: 0.85rem; line-height: 1.5; }
+        .ss-doc-meta   { margin: 0.5rem 0 0 0; color: #9ca3af; font-size: 0.75rem; }
 
-        .ss-doc-detail,
-        .ss-doc-meta {
-            margin: 0;
-            color: var(--ss-muted);
-            line-height: 1.5;
-            font-size: 0.9rem;
-        }
-
-        .ss-doc-meta {
-            margin-top: 0.65rem;
-            font-size: 0.8rem;
-            color: #6f7378;
-        }
-
+        /* ---- Empty state ---- */
         .ss-empty-state {
-            padding: 1.4rem;
-            margin-top: 1.1rem;
-            animation: ssRise 0.8s ease-out;
+            padding: 2rem 1.5rem;
+            border-radius: var(--ss-radius);
+            background: var(--ss-card);
+            border: 1px dashed var(--ss-border);
+            text-align: center;
+            margin-top: 0.75rem;
+            animation: ssRise 0.5s ease-out;
         }
+        .ss-empty-state h3 { margin: 0 0 0.35rem 0; color: var(--ss-ink); font-size: 1rem; }
+        .ss-empty-state p  { margin: 0; color: var(--ss-muted); font-size: 0.9rem; line-height: 1.6; }
 
-        .ss-empty-state h3 {
-            margin: 0 0 0.35rem 0;
-            color: var(--ss-ink);
-        }
+        /* ---- Section shell (document area wrapper) ---- */
+        .ss-section-shell { margin-top: 0.5rem; }
 
-        .ss-empty-state p {
-            margin: 0;
-            color: var(--ss-muted);
-            line-height: 1.6;
-        }
-
-        .ss-sidebar-card {
-            padding: 1rem;
-            margin-bottom: 0.95rem;
-        }
-
-        .ss-sidebar-card h3,
-        .ss-sidebar-card h4 {
-            margin: 0 0 0.45rem 0;
-            color: var(--ss-ink);
-        }
-
-        .ss-sidebar-card p,
-        .ss-sidebar-card li {
-            color: var(--ss-muted);
-            line-height: 1.55;
-        }
-
-        .ss-sidebar-card ol {
-            padding-left: 1.15rem;
-            margin: 0.35rem 0 0 0;
-        }
-
-        .stButton > button,
-        .stDownloadButton > button {
-            border-radius: 999px;
-            border: 0;
-            height: 2.9rem;
+        /* ---- Buttons ---- */
+        .stButton > button {
+            border-radius: var(--ss-radius);
             font-weight: 600;
-            box-shadow: 0 10px 22px rgba(66, 133, 244, 0.16);
-            transition: transform 180ms ease, box-shadow 180ms ease;
+            transition: opacity 160ms ease, transform 120ms ease;
         }
+        .stButton > button:hover { opacity: 0.88; transform: translateY(-1px); }
 
-        .stButton > button:hover,
-        .stDownloadButton > button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 16px 28px rgba(66, 133, 244, 0.2);
-        }
-
-        .stFileUploader,
-        [data-testid="stChatInput"] {
-            border-radius: 24px;
-        }
-
-        [data-testid="stFileUploader"] section {
-            border-radius: 24px;
-            border: 1px dashed rgba(66, 133, 244, 0.35);
-            background: rgba(255, 255, 255, 0.7);
-        }
-
+        /* ---- Chat messages ---- */
         [data-testid="stChatMessage"] {
-            border-radius: 22px;
-            background: rgba(255, 255, 255, 0.78);
-            border: 1px solid rgba(66, 133, 244, 0.08);
-            box-shadow: 0 12px 28px rgba(60, 64, 67, 0.07);
-            padding: 0.2rem 0.35rem;
+            border-radius: var(--ss-radius);
+            background: var(--ss-card);
+            border: 1px solid var(--ss-border);
+            box-shadow: var(--ss-shadow-sm);
+            padding: 0.15rem 0.3rem;
         }
 
-        [data-testid="stChatInput"] textarea {
-            min-height: 52px;
+        /* ---- Chat input ---- */
+        [data-testid="stChatInput"] textarea { min-height: 48px; }
+
+        /* ---- File uploader ---- */
+        [data-testid="stFileUploader"] section {
+            border-radius: var(--ss-radius);
+            border: 1.5px dashed var(--ss-border);
+            background: #f9fafb;
         }
 
+        /* ---- Animations ---- */
         @keyframes ssRise {
-            from {
-                opacity: 0;
-                transform: translateY(12px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
         }
-
         @keyframes ssPulse {
-            0%, 100% {
-                transform: scale(1);
-                opacity: 0.95;
-            }
-            50% {
-                transform: scale(1.25);
-                opacity: 0.45;
-            }
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50%       { transform: scale(1.3); opacity: 0.4; }
         }
 
+        /* ---- Responsive ---- */
         @media (max-width: 768px) {
-            .ss-hero {
-                padding: 1.3rem;
-            }
-
-            .ss-hero h1 {
-                font-size: 1.85rem;
-            }
-
-            .ss-summary-grid {
-                grid-template-columns: 1fr;
-            }
+            .ss-doc-grid { grid-template-columns: 1fr; }
         }
         </style>
         """,
@@ -709,41 +565,6 @@ def poll_document_statuses(force: bool = False):
         st.session_state.document_status_error = f"Status polling error: {exc}"
 
 
-def render_hero():
-    """Render the main hero section."""
-    summary = summarize_documents()
-    st.markdown(
-        f"""
-        <section class="ss-hero">
-            <div class="ss-eyebrow">SmartStudy Workspace</div>
-            <h1>Upload notes, watch ingestion live, then ask better questions.</h1>
-            <p>
-                Batch-upload your PDFs, track when each one is actually ready for retrieval,
-                and keep the study flow moving in one clean interface.
-            </p>
-        </section>
-        <div class="ss-summary-grid">
-            <div class="ss-summary-card">
-                <div class="ss-summary-label">Ready For Chat</div>
-                <div class="ss-summary-value">{summary["ready"]}</div>
-                <div class="ss-summary-hint">Documents fully indexed in MongoDB.</div>
-            </div>
-            <div class="ss-summary-card">
-                <div class="ss-summary-label">Processing</div>
-                <div class="ss-summary-value">{summary["processing"]}</div>
-                <div class="ss-summary-hint">We keep checking until ingestion finishes.</div>
-            </div>
-            <div class="ss-summary-card">
-                <div class="ss-summary-label">Session</div>
-                <div class="ss-summary-value">{st.session_state.session_id[:8]}</div>
-                <div class="ss-summary-hint">Chat history stays scoped to this study session.</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def build_document_card(document: dict) -> str:
     """Return a styled HTML card for one uploaded PDF."""
     status = document.get("status", "processing")
@@ -852,30 +673,35 @@ def render_document_status_area():
 def render_sidebar():
     """Render sidebar controls and upload flow."""
     with st.sidebar:
+        summary = summarize_documents()
+        badges = [
+            f'<span class="ss-badge ready">✓ {summary["ready"]} ready</span>'
+        ]
+        if summary["processing"] > 0:
+            badges.append(
+                f'<span class="ss-badge processing">⏳ {summary["processing"]} processing</span>'
+            )
+
         st.markdown(
             """
-            <section class="ss-sidebar-card">
-                <h3>How it works</h3>
-                <ol>
-                    <li>Select one or more PDF lecture notes.</li>
-                    <li>Upload the whole batch with one click.</li>
-                    <li>Watch each file move from ingesting to ready.</li>
-                    <li>Ask questions or type <code>/quiz</code> in the chat.</li>
-                </ol>
-            </section>
+            <div class="ss-brand">
+              <span class="ss-brand-icon">🎓</span>
+              <div class="ss-brand-text">
+                <h2>SmartStudy</h2>
+                <span>AI Academic Tutor</span>
+              </div>
+            </div>
             """,
             unsafe_allow_html=True,
         )
 
         st.markdown(
-            """
-            <section class="ss-sidebar-card">
-                <h4>Upload PDFs</h4>
-                <p>Each upload gets a unique cloud object name so files never overwrite each other.</p>
-            </section>
-            """,
+            f'<div class="ss-status-badges">{"".join(badges)}</div>',
             unsafe_allow_html=True,
         )
+
+        st.divider()
+        st.markdown("**📄 Upload lecture notes**")
 
         uploaded_pdfs = st.file_uploader(
             "Choose one or more PDF documents",
@@ -933,12 +759,9 @@ def render_sidebar():
             else:
                 st.error(feedback["message"])
 
-        if st.session_state.history_error:
-            st.info(st.session_state.history_error)
-
         st.divider()
 
-        if st.button("Clear chat history", use_container_width=True):
+        if st.button("🔄 New Session", use_container_width=True):
             old_session_id = st.session_state.session_id
             try:
                 requests.delete(
@@ -957,7 +780,43 @@ def render_sidebar():
             st.session_state.upload_feedback = None
             st.rerun()
 
-        st.caption(f"Session: `{st.session_state.session_id[:8]}`")
+        st.caption(f"Session · `{st.session_state.session_id[:8]}`")
+
+        with st.expander("ℹ️ How to use"):
+            st.markdown(
+                """
+                1. Select one or more PDF lecture notes.
+                2. Upload the whole batch with one click.
+                3. Watch each file move from ingesting to ready.
+                4. Ask questions or type `/quiz` in the chat.
+                """
+            )
+
+        if st.session_state.history_error:
+            st.info(st.session_state.history_error)
+
+
+def render_chat_welcome():
+    """Render the empty-state welcome screen inside the Chat tab."""
+    summary = summarize_documents()
+    if summary["ready"] > 0:
+        subtitle = f"{summary['ready']} document(s) indexed and ready for retrieval."
+    elif summary["processing"] > 0:
+        subtitle = "Your notes are still ingesting — you can already ask questions."
+    else:
+        subtitle = "Upload lecture PDFs from the sidebar to get grounded answers."
+
+    st.markdown(
+        f"""
+        <div class="ss-welcome">
+            <div class="ss-welcome-icon">🎓</div>
+            <h2>Ask your tutor anything</h2>
+            <p>{subtitle}</p>
+            <span class="ss-quiz-tip">💡 Type /quiz to generate a 5-question MCQ from your notes</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_chat_history():
@@ -966,9 +825,14 @@ def render_chat_history():
         role = normalize_chat_role(msg.get("role", "assistant"))
         with st.chat_message(role):
             st.markdown(msg.get("content", ""))
+            sources = msg.get("sources", [])
+            if role == "assistant" and sources:
+                with st.expander("Sources"):
+                    for src in sources:
+                        st.markdown(f"- {src}")
 
 
-def handle_chat_input():
+def handle_chat_input(chat_container=None):
     """Handle the chat interaction with the backend."""
     placeholder = "Ask a question about your lecture notes."
     if not st.session_state.uploaded_documents:
@@ -978,54 +842,73 @@ def handle_chat_input():
 
     if prompt := st.chat_input(placeholder):
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
+        render_target = chat_container if chat_container is not None else st.container()
         assistant_message_for_history = None
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking."):
-                try:
-                    response = requests.post(
-                        f"{CHAT_API_URL}/chat",
-                        json={
-                            "question": prompt,
-                            "session_id": st.session_state.session_id,
-                        },
-                        timeout=60,
-                    )
-                    response.raise_for_status()
-                    data = safe_json(response)
-                    answer = data.get(
-                        "answer",
-                        "Sorry, I could not generate a response.",
-                    )
-                    sources = data.get("sources", [])
-                    assistant_message_for_history = answer
+        assistant_sources = []
 
-                    st.markdown(answer)
+        with render_target:
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-                    if sources:
-                        with st.expander("Sources"):
-                            for src in sources:
-                                st.markdown(f"- {src}")
-                except requests.exceptions.ConnectionError:
-                    answer = "Cannot reach the Chat API. Is the backend running?"
-                    st.error(answer)
-                except Exception as exc:
-                    answer = f"Error: {exc}"
-                    st.error(answer)
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking."):
+                    try:
+                        response = requests.post(
+                            f"{CHAT_API_URL}/chat",
+                            json={
+                                "question": prompt,
+                                "session_id": st.session_state.session_id,
+                            },
+                            timeout=60,
+                        )
+                        response.raise_for_status()
+                        data = safe_json(response)
+                        answer = data.get(
+                            "answer",
+                            "Sorry, I could not generate a response.",
+                        )
+                        assistant_sources = data.get("sources", [])
+                        assistant_message_for_history = answer
+
+                        st.markdown(answer)
+
+                        if assistant_sources:
+                            with st.expander("Sources"):
+                                for src in assistant_sources:
+                                    st.markdown(f"- {src}")
+                    except requests.exceptions.ConnectionError:
+                        answer = "Cannot reach the Chat API. Is the backend running?"
+                        st.error(answer)
+                    except Exception as exc:
+                        answer = f"Error: {exc}"
+                        st.error(answer)
 
         if assistant_message_for_history is not None:
-            st.session_state.messages.append(
-                {"role": "assistant", "content": assistant_message_for_history}
-            )
+            assistant_message = {
+                "role": "assistant",
+                "content": assistant_message_for_history,
+            }
+            if assistant_sources:
+                assistant_message["sources"] = assistant_sources
+            st.session_state.messages.append(assistant_message)
 
 
 init_session_state()
 hydrate_chat_history_once()
 render_theme()
 render_sidebar()
-render_hero()
-render_document_status_area()
-render_chat_history()
-handle_chat_input()
+
+tab_chat, tab_docs = st.tabs(["💬  Chat", "📚  Documents"])
+
+with tab_chat:
+    if not st.session_state.messages:
+        render_chat_welcome()
+    chat_history_container = st.container()
+    with chat_history_container:
+        render_chat_history()
+    handle_chat_input(chat_history_container)
+
+with tab_docs:
+    st.markdown("### 📚 Your Study Materials")
+    st.caption("Files move from *Ingesting* → *Ready* automatically after upload.")
+    render_document_status_area()
