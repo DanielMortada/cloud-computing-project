@@ -1,6 +1,6 @@
 # SmartStudy Architecture - Developer Deep Dive
 
-Last updated: 2026-04-01
+Last updated: 2026-04-02
 
 This document is the technical reference for the current production setup and data flow.
 
@@ -26,6 +26,7 @@ From `.env` + defaults:
 - `GCP_PROJECT_ID=smart-study-491919`
 - `GCP_REGION=europe-west1`
 - `GCS_BUCKET_NAME=smartstudy-pdfs-491919`
+- `MONGODB_URI` explicitly enables `retryWrites=true`, `w=majority`, and `appName=smartstudy`
 - `MONGODB_DB_NAME=smartstudy`
 - `MONGODB_COLLECTION=context`
 - `MONGODB_CHAT_HISTORY_COLLECTION=chat_history`
@@ -38,6 +39,7 @@ From `.env` + defaults:
 - `STATUS_POLL_INTERVAL_SECONDS=4` (UI default)
 - `STATUS_REQUEST_TIMEOUT_SECONDS=15` (UI default)
 - `HISTORY_REQUEST_TIMEOUT_SECONDS=15` (UI default)
+- Gemini generation cap: `max_output_tokens=8192`
 
 ## 2) System Flow (Detailed)
 
@@ -65,8 +67,9 @@ flowchart TD
 
     UI -->|8. Ask question| CHAT[/POST /chat/]
     CHAT -->|9. Receive chat request| API
-    API -->|10. Vector search k=5| CTX
-    CTX -->|11. Return relevant chunks| API
+    API -->|10a. Standard question: vector search k=5| CTX
+    API -->|10b. /quiz: sample indexed chunks| CTX
+    CTX -->|11. Return context records| API
     API -->|12. Read or write session history| HIST[(MongoDB chat_history)]
     API -->|13. Generate grounded answer| LLM[Vertex AI Gemini 2.5 Flash]
     LLM -->|14. Return model output| API
@@ -123,7 +126,8 @@ Pipeline in `cloud_function/main.py -> process_pdf`:
 5. Enforce idempotency per object path:
    - `delete_vectors_for_source(blob_name)` before insert.
 6. Insert chunk docs into Mongo `context`.
-7. Reconcile stale vectors against current bucket content:
+7. Reuse shared module-level MongoDB and GCS clients inside the warm function instance to avoid rebuilding clients on every helper call.
+8. Reconcile stale vectors against current bucket content:
    - remove docs whose `source` no longer exists in GCS.
 
 ### D) Delete-sync path (`smartstudy-cleanup`)
@@ -140,13 +144,15 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 ### E) Chat path (`POST /chat`)
 
 1. Read user question and `session_id`.
-2. Retrieve top-k (`k=5`) context chunks from Mongo vector index.
+2. Choose retrieval strategy:
+   - normal questions: retrieve top-k (`k=5`) chunks from Mongo vector search
+   - `/quiz`: randomly sample 10 indexed chunk records from Mongo `context`
 3. Normalize source/page metadata for citations.
 4. Compose prompt:
    - system tutor persona
    - conversation history (`MongoDBChatMessageHistory`)
    - retrieved context
-5. Generate answer with Gemini 2.5 Flash.
+5. Generate answer with Gemini 2.5 Flash using `max_output_tokens=8192`.
 6. Return:
    - `answer`
    - deduplicated `sources` list
@@ -159,6 +165,7 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 4. API normalizes message roles to `user` / `assistant` and returns a JSON list.
 5. UI rehydrates the conversation before rendering chat messages.
 6. If URL `sid` changes or is absent, UI intentionally starts a new session.
+7. Temporary transport errors in the UI are not persisted as assistant messages.
 
 ## 4) Data Model (Current)
 
@@ -261,6 +268,7 @@ gcloud functions deploy smartstudy-cleanup \
 - Anyone with the same `sid` can view the same session history; authentication is not enforced yet.
 - Source list may include multiple active files if user uploads several PDFs; expected behavior.
 - Readiness polling is inferred from indexed chunk presence and storage checks, so status is near-real-time but event-driven.
+- `reconcile_context_with_bucket()` still performs a full bucket + collection consistency scan after each upload as a safety net; useful for resilience at demo scale, but not the most scalable long-term design.
 - Optional future hardening:
   - add document ownership filtering
   - add a dedicated documents-status collection for richer pipeline states

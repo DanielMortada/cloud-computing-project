@@ -1,6 +1,6 @@
 # SmartStudy Architecture - High-Level Overview
 
-Last updated: 2026-04-01
+Last updated: 2026-04-02
 
 This is the quick, non-technical view of what the system does today.
 
@@ -54,7 +54,9 @@ flowchart LR
    - stores vectors in MongoDB
 4. UI polls document status and shows per-file readiness in the interface.
 5. Student asks a question in chat.
-6. Chat API retrieves relevant chunks from MongoDB.
+6. Chat API retrieves context from MongoDB:
+   - normal questions use vector search
+   - `/quiz` samples a broader set of indexed chunks for grounded quiz generation
 7. Gemini generates an answer with citations.
 8. UI displays answer + sources.
 
@@ -66,7 +68,7 @@ flowchart LR
 - Live per-document readiness notifications in UI via status polling.
 - Vector search on MongoDB Atlas.
 - Grounded Q&A with source citations.
-- Quiz command support in tutor prompt (`/quiz`).
+- Dedicated `/quiz` mode that builds quizzes from sampled indexed chunks instead of searching for the literal `/quiz` string.
 - Conversation memory restored on refresh for the same session URL (`sid`).
 - Automatic cleanup of vectors when PDFs are deleted from GCS.
 
@@ -90,6 +92,7 @@ flowchart LR
 
 - Session continuity depends on keeping the same `sid` in the URL; opening a new session starts empty history.
 - If multiple PDFs are active, citation lists may show multiple files by design.
+- The ingestion function still runs a bucket-to-Mongo reconciliation safety scan after uploads; acceptable for project scale, but not ideal for very large corpora.
 - User authentication and strict per-user document isolation are not enabled yet.
 
 ## Next Evolution (When Needed)

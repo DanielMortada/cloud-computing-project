@@ -95,7 +95,7 @@ gcloud functions deploy smartstudy-ingest \
   --entry-point=process_pdf \
   --trigger-event-filters="type=google.cloud.storage.object.v1.finalized" \
   --trigger-event-filters="bucket=YOUR_BUCKET_NAME" \
-  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005" \
   --memory=1Gi \
   --timeout=300s
 ```
@@ -111,7 +111,7 @@ gcloud functions deploy smartstudy-cleanup \
   --entry-point=cleanup_deleted_pdf \
   --trigger-event-filters="type=google.cloud.storage.object.v1.deleted" \
   --trigger-event-filters="bucket=YOUR_BUCKET_NAME" \
-  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
   --memory=1Gi \
   --timeout=300s
 
@@ -127,7 +127,7 @@ gcloud run deploy smartstudy-chat-api \
   --source=. \
   --region=europe-west1 \
   --allow-unauthenticated \
-  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,MONGODB_CHAT_HISTORY_COLLECTION=chat_history,MONGODB_VECTOR_INDEX_NAME=vector_index,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005,VERTEX_AI_LLM_MODEL=gemini-2.5-flash" \
   --memory=1Gi
 
 cd ..

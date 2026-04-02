@@ -134,6 +134,89 @@ def _extract_source_and_page(doc):
     return source, page_display
 
 
+def _extract_source_and_page_from_record(record: dict):
+    """Support quiz retrieval from raw MongoDB records."""
+    metadata = record.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    source = (
+        record.get("source")
+        or record.get("filename")
+        or metadata.get("source")
+        or metadata.get("filename")
+        or "unknown"
+    )
+
+    if record.get("pageNumber") is not None:
+        page_display = str(record.get("pageNumber"))
+    else:
+        raw_page = (
+            record.get("page")
+            if record.get("page") is not None
+            else metadata.get("page")
+        )
+        page_display = _normalize_page_display(raw_page)
+
+    return source, page_display
+
+
+def _is_quiz_command(question: str) -> bool:
+    """Return True when the user is invoking quiz mode."""
+    return question.strip().lower() == "/quiz"
+
+
+def _sample_quiz_records(sample_size: int = 10) -> list[dict]:
+    """Fetch a small random sample of indexed chunks for quiz generation."""
+    collection = get_context_collection()
+    pipeline = [
+        {
+            "$match": {
+                "textChunk": {
+                    "$exists": True,
+                    "$type": "string",
+                    "$ne": "",
+                }
+            }
+        },
+        {"$sample": {"size": sample_size}},
+    ]
+    return list(collection.aggregate(pipeline))
+
+
+def _build_context_and_sources(retrieved_docs) -> tuple[str, list[str]]:
+    """Normalize different retrieval outputs into prompt context and source labels."""
+    context_parts = []
+    source_labels = set()
+
+    for item in retrieved_docs:
+        if hasattr(item, "page_content"):
+            source, page = _extract_source_and_page(item)
+            content = item.page_content
+        else:
+            source, page = _extract_source_and_page_from_record(item)
+            content = item.get("textChunk") or item.get("page_content") or ""
+
+        if not content:
+            continue
+
+        context_parts.append(f"[Source: {source}, Page: {page}]\n{content}")
+        source_labels.add(f"{source} (p.{page})")
+
+    return "\n\n---\n\n".join(context_parts), sorted(source_labels)
+
+
+def retrieve_context_for_question(question: str) -> tuple[str, list[str]]:
+    """Retrieve context differently for standard chat and quiz mode."""
+    if _is_quiz_command(question):
+        sampled_records = _sample_quiz_records(sample_size=10)
+        return _build_context_and_sources(sampled_records)
+
+    vs = get_vector_store()
+    docs = vs.similarity_search(question, k=5)
+    return _build_context_and_sources(docs)
+
+
 def get_mongo_client() -> MongoClient:
     global mongo_client
     if mongo_client is None:
@@ -249,7 +332,7 @@ def build_rag_chain():
         project=GCP_PROJECT_ID,
         location=GCP_REGION,
         temperature=0.3,
-        max_output_tokens=2048,
+        max_output_tokens=8192,
     )
 
     prompt = ChatPromptTemplate.from_messages(
@@ -418,21 +501,8 @@ def chat():
         return jsonify({"error": "No question provided"}), 400
 
     try:
-        # 1. Retrieve relevant context from vector store
-        vs = get_vector_store()
-        docs = vs.similarity_search(question, k=5)
-
-        context_parts = []
-        source_labels = set()
-        for doc in docs:
-            source, page = _extract_source_and_page(doc)
-            context_parts.append(
-                f"[Source: {source}, Page: {page}]\n{doc.page_content}"
-            )
-            source_labels.add(f"{source} (p.{page})")
-
-        context_text = "\n\n---\n\n".join(context_parts)
-        sources = sorted(source_labels)
+        # 1. Retrieve relevant context using a dedicated path for quiz mode.
+        context_text, sources = retrieve_context_for_question(question)
 
         # 2. Run the RAG chain with conversation history
         chain = build_rag_chain()

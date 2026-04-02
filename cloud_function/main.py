@@ -23,13 +23,32 @@ EMBEDDING_MODEL = os.environ.get("VERTEX_AI_EMBEDDING_MODEL", "text-embedding-00
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 GCP_REGION = os.environ.get("GCP_REGION", "europe-west1")
 
+mongo_client: MongoClient | None = None
+storage_client: storage.Client | None = None
+
 
 # ---------------------------------------------------------------------------
 # MongoDB helpers
 # ---------------------------------------------------------------------------
+def get_mongo_client() -> MongoClient:
+    """Return a shared MongoDB client for the function instance."""
+    global mongo_client
+    if mongo_client is None:
+        mongo_client = MongoClient(MONGODB_URI)
+    return mongo_client
+
+
+def get_storage_client() -> storage.Client:
+    """Return a shared Google Cloud Storage client for the function instance."""
+    global storage_client
+    if storage_client is None:
+        storage_client = storage.Client()
+    return storage_client
+
+
 def get_mongodb_collection():
     """Return the MongoDB collection used for storing document chunks."""
-    client = MongoClient(MONGODB_URI)
+    client = get_mongo_client()
     db = client[MONGODB_DB_NAME]
     return db[MONGODB_COLLECTION]
 
@@ -50,8 +69,7 @@ def delete_vectors_for_source(source_name: str) -> int:
 
 def list_pdf_sources_in_bucket(bucket_name: str) -> set[str]:
     """Return all PDF object names currently present in the bucket."""
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
+    bucket = get_storage_client().bucket(bucket_name)
     pdf_sources: set[str] = set()
     for blob in bucket.list_blobs():
         if blob.name and blob.name.lower().endswith(".pdf"):
@@ -90,8 +108,7 @@ def reconcile_context_with_bucket(bucket_name: str) -> int:
 # ---------------------------------------------------------------------------
 def download_pdf_from_gcs(bucket_name: str, blob_name: str, dest_path: str):
     """Download a PDF from GCS to a local temporary path."""
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
+    bucket = get_storage_client().bucket(bucket_name)
     blob = bucket.blob(blob_name)
     blob.download_to_filename(dest_path)
     print(f"Downloaded gs://{bucket_name}/{blob_name} to {dest_path}")
@@ -239,8 +256,7 @@ def cleanup_deleted_pdf(cloud_event):
 
     # Overwrite operations can emit delete events for older generations.
     # If the same object path still exists, do not remove vectors.
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
+    bucket = get_storage_client().bucket(bucket_name)
     if bucket.blob(blob_name).exists():
         print(
             f"Skipping cleanup for {blob_name}: object path still exists "

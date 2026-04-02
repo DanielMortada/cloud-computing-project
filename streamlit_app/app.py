@@ -981,6 +981,7 @@ def handle_chat_input():
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        assistant_message_for_history = None
         with st.chat_message("assistant"):
             with st.spinner("Thinking."):
                 try:
@@ -999,6 +1000,7 @@ def handle_chat_input():
                         "Sorry, I could not generate a response.",
                     )
                     sources = data.get("sources", [])
+                    assistant_message_for_history = answer
 
                     st.markdown(answer)
 
@@ -1013,7 +1015,10 @@ def handle_chat_input():
                     answer = f"Error: {exc}"
                     st.error(answer)
 
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        if assistant_message_for_history is not None:
+            st.session_state.messages.append(
+                {"role": "assistant", "content": assistant_message_for_history}
+            )
 
 
 init_session_state()
