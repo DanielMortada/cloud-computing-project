@@ -56,14 +56,7 @@ def get_mongodb_collection():
 def delete_vectors_for_source(source_name: str) -> int:
     """Delete all vectors belonging to one source file path/name."""
     collection = get_mongodb_collection()
-    result = collection.delete_many(
-        {
-            "$or": [
-                {"source": source_name},
-                {"metadata.source": source_name},
-            ]
-        }
-    )
+    result = collection.delete_many({"source": source_name})
     return result.deleted_count
 
 
@@ -88,11 +81,10 @@ def reconcile_context_with_bucket(bucket_name: str) -> int:
     stale_ids = []
     cursor = collection.find(
         {},
-        {"_id": 1, "source": 1, "metadata.source": 1},
+        {"_id": 1, "source": 1},
     )
     for doc in cursor:
-        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
-        source = doc.get("source") or metadata.get("source")
+        source = doc.get("source")
         if not source or source not in active_pdf_sources:
             stale_ids.append(doc["_id"])
 
@@ -165,21 +157,18 @@ def upsert_to_mongodb(chunks, embeddings):
     for chunk, embedding in zip(chunks, embeddings):
         chunk_metadata = chunk.metadata or {}
         source = chunk_metadata.get("source", "unknown")
+
+        # Store the raw 0-based page index from PyPDFLoader as-is.
+        # The Chat API's _normalize_page_display() handles the +1 conversion
+        # for human-readable display.
         raw_page = chunk_metadata.get("page")
-        page_number = None
-        if isinstance(raw_page, int):
-            page_number = raw_page + 1 if raw_page >= 0 else raw_page
-        elif isinstance(raw_page, str) and raw_page.strip().isdigit():
-            page_int = int(raw_page.strip())
-            page_number = page_int + 1 if page_int >= 0 else page_int
 
         documents.append(
             {
                 "textChunk": chunk.page_content,
                 "vectorEmbedding": embedding,
                 "source": source,
-                "pageNumber": page_number,
-                "metadata": chunk_metadata,
+                "page": raw_page,
             }
         )
 

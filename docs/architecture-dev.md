@@ -139,7 +139,7 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 3. Overwrite-race guard:
    - if same object path still exists (generation replacement), skip cleanup.
 4. If truly deleted:
-   - `delete_many` vectors where `source` or `metadata.source` matches blob path.
+   - `delete_many` vectors where `source` matches blob path.
 
 ### E) Chat path (`POST /chat`)
 
@@ -177,17 +177,13 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
   "textChunk": "chunk text",
   "vectorEmbedding": [0.012, -0.091, "..."],
   "source": "uploads/my-file-a1b2c3d4.pdf",
-  "pageNumber": 4,
-  "metadata": {
-    "source": "uploads/my-file-a1b2c3d4.pdf",
-    "page": 3
-  }
+  "page": 3
 }
 ```
 
 Notes:
-- `pageNumber` is stored as user-facing 1-based when available.
-- Legacy docs may still rely on nested `metadata.page`; Chat API handles both.
+- `source` and `page` are flat top-level fields — `MongoDBAtlasVectorSearch` maps them directly into `Document.metadata` on retrieval.
+- `page` is stored as the raw 0-based index from PyPDFLoader; the Chat API's `_normalize_page_display()` converts to 1-based for citations.
 
 ### MongoDB `chat_history`
 

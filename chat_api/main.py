@@ -106,58 +106,19 @@ def _normalize_page_display(raw_page):
 
 
 def _extract_source_and_page(doc):
-    """Support both legacy nested metadata and flattened metadata fields."""
+    """Extract source and page from a LangChain Document's metadata."""
     metadata = doc.metadata or {}
-    nested = metadata.get("metadata", {})
-    if not isinstance(nested, dict):
-        nested = {}
-
-    source = (
-        metadata.get("source")
-        or metadata.get("filename")
-        or nested.get("source")
-        or nested.get("filename")
-        or "unknown"
-    )
-
-    # Prefer explicit pageNumber when available (new ingestion format).
-    if metadata.get("pageNumber") is not None:
-        page_display = str(metadata.get("pageNumber"))
-    else:
-        raw_page = (
-            metadata.get("page")
-            if metadata.get("page") is not None
-            else nested.get("page")
-        )
-        page_display = _normalize_page_display(raw_page)
-
+    source = metadata.get("source", "unknown")
+    raw_page = metadata.get("page")
+    page_display = _normalize_page_display(raw_page)
     return source, page_display
 
 
 def _extract_source_and_page_from_record(record: dict):
-    """Support quiz retrieval from raw MongoDB records."""
-    metadata = record.get("metadata", {})
-    if not isinstance(metadata, dict):
-        metadata = {}
-
-    source = (
-        record.get("source")
-        or record.get("filename")
-        or metadata.get("source")
-        or metadata.get("filename")
-        or "unknown"
-    )
-
-    if record.get("pageNumber") is not None:
-        page_display = str(record.get("pageNumber"))
-    else:
-        raw_page = (
-            record.get("page")
-            if record.get("page") is not None
-            else metadata.get("page")
-        )
-        page_display = _normalize_page_display(raw_page)
-
+    """Extract source and page from a raw MongoDB document."""
+    source = record.get("source", "unknown")
+    raw_page = record.get("page")
+    page_display = _normalize_page_display(raw_page)
     return source, page_display
 
 
@@ -368,13 +329,8 @@ def build_upload_object_name(original_filename: str) -> str:
 
 
 def _document_source_filter(object_name: str) -> dict:
-    """Match both current and legacy source field layouts."""
-    return {
-        "$or": [
-            {"source": object_name},
-            {"metadata.source": object_name},
-        ]
-    }
+    """Build a MongoDB filter matching documents by their source path."""
+    return {"source": object_name}
 
 
 def get_document_status(object_name: str, source_name: str | None = None) -> dict:
