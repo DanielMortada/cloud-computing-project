@@ -172,9 +172,10 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
    - conversation history (`MongoDBChatMessageHistory`)
    - retrieved context
 7. Generate answer with Gemini 2.5 Flash using `max_output_tokens=8192`.
-8. Return:
+8. Filter the source summary against the generated answer, keeping only labels whose filename and page are cited inline.
+9. Return:
    - `answer`
-   - deduplicated `sources` list
+   - deduplicated, cited-only `sources` list
 
 ### G) Session rehydration (`GET /history` + `GET /documents` + UI `sid`)
 

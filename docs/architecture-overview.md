@@ -71,6 +71,7 @@ flowchart LR
 - Documents can be removed from the current session directly from the Documents tab.
 - Grounded Q&A with source citations.
 - Short social prompts and no-context questions return without document citations.
+- Sources expander summaries are filtered to inline citations, so retrieved-but-unused documents are not shown as references.
 - Dedicated `/quiz` mode that builds quizzes from sampled indexed chunks instead of searching for the literal `/quiz` string.
 - Conversation memory restored on refresh or reopen for the same session URL (`sid`).
 - Automatic cleanup of vectors when PDFs are deleted from GCS.

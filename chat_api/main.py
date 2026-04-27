@@ -269,6 +269,73 @@ def _build_context_and_sources(retrieved_docs) -> tuple[str, list[str]]:
     return "\n\n---\n\n".join(context_parts), sorted(source_labels)
 
 
+def _source_label_parts(source_label: str) -> tuple[str, str]:
+    """Split a UI source label into filename and page display parts."""
+    match = re.match(r"^(?P<source>.+)\s+\(p\.(?P<page>[^)]+)\)$", source_label)
+    if not match:
+        return source_label.strip(), ""
+    return match.group("source").strip(), match.group("page").strip()
+
+
+def _regex_for_literal_text(value: str) -> str:
+    """Build a regex pattern for literal text while tolerating whitespace differences."""
+    escaped = re.escape(value.strip())
+    return re.sub(r"\\\s+", r"\\s+", escaped)
+
+
+def _page_reference_pattern(page: str) -> str:
+    """Return citation regex variants for the page format shown in source labels."""
+    escaped_page = re.escape(page.strip())
+    return rf"(?:p\.?\s*{escaped_page}(?!\d)|pages?\s+{escaped_page}(?!\d))"
+
+
+def _answer_mentions_source_page(answer: str, source_name: str, page: str) -> bool:
+    """Return True when the final answer cites a specific source label."""
+    if not answer or not source_name:
+        return False
+
+    source_pattern = _regex_for_literal_text(source_name)
+    if not re.search(source_pattern, answer, flags=re.IGNORECASE):
+        return False
+
+    if not page or page == "?":
+        return True
+
+    page_pattern = _page_reference_pattern(page)
+    return bool(
+        re.search(
+            rf"{source_pattern}.{{0,160}}{page_pattern}|{page_pattern}.{{0,160}}{source_pattern}",
+            answer,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def filter_sources_to_answer_citations(answer: str, retrieved_sources: list[str]) -> list[str]:
+    """
+    Keep the source summary aligned with inline citations in the final answer.
+
+    Retrieval can provide several chunks to the model, but the UI source
+    expander should only list sources the model actually cited.
+    """
+    page_level_matches = []
+    file_level_matches = []
+
+    for source_label in retrieved_sources:
+        source_name, page = _source_label_parts(source_label)
+        if not source_name:
+            continue
+        source_pattern = _regex_for_literal_text(source_name)
+        if not re.search(source_pattern, answer or "", flags=re.IGNORECASE):
+            continue
+
+        file_level_matches.append(source_label)
+        if _answer_mentions_source_page(answer, source_name, page):
+            page_level_matches.append(source_label)
+
+    return page_level_matches or file_level_matches
+
+
 def get_embeddings_model() -> VertexAIEmbeddings:
     """Return a shared Vertex AI embeddings client."""
     global embeddings_model
@@ -747,8 +814,9 @@ def chat():
             {"question": question, "context": context_text},
             config={"configurable": {"session_id": session_id}},
         )
+        cited_sources = filter_sources_to_answer_citations(answer, sources)
 
-        return jsonify({"answer": answer, "sources": sources})
+        return jsonify({"answer": answer, "sources": cited_sources})
 
     except Exception as e:
         print(f"❌ Error in /chat: {e}")

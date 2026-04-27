@@ -138,6 +138,8 @@ def retrieve_context_for_question(question: str, session_id: str) -> tuple[str, 
 
 The API also applies a minimum similarity threshold before using retrieved chunks as context. If the best-ranked chunk is still too weakly related to the question, the API returns its no-context answer with `sources: []` instead of forcing a citation from an unrelated document.
 
+After Gemini generates the final answer, the API filters the returned `sources` array against the inline citations in that answer. This keeps the UI's Sources expander from showing retrieved-but-unused documents.
+
 **3. Session-scoped similarity ranking - how it works under the hood**
 
 To guarantee isolation between sessions without relying on a shared cross-session retrieval call, the Chat API:

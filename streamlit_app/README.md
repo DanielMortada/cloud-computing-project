@@ -271,6 +271,8 @@ if prompt := st.chat_input(placeholder):
 
 An important detail: **error messages are never saved to chat history**. If the API is unreachable, the error is displayed with `st.error()` but not appended to `st.session_state.messages`. This prevents "Error: connection refused" from showing up as a permanent assistant message.
 
+The UI also filters the Sources expander against the assistant answer before display. If an API response contains a retrieved source that is not cited inline, the expander hides it instead of presenting it as a used reference.
+
 ---
 
 ## UI Layout

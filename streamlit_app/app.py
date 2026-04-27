@@ -8,6 +8,7 @@ Deployed on Cloud Run alongside the Chat API.
 
 import html
 import os
+import re
 import uuid
 from textwrap import dedent
 
@@ -364,6 +365,69 @@ def safe_json(response: requests.Response) -> dict:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def source_label_parts(source_label: str) -> tuple[str, str]:
+    """Split a UI source label into filename and page display parts."""
+    match = re.match(r"^(?P<source>.+)\s+\(p\.(?P<page>[^)]+)\)$", source_label)
+    if not match:
+        return source_label.strip(), ""
+    return match.group("source").strip(), match.group("page").strip()
+
+
+def regex_for_literal_text(value: str) -> str:
+    """Build a regex pattern for literal text while tolerating whitespace differences."""
+    escaped = re.escape(value.strip())
+    return re.sub(r"\\\s+", r"\\s+", escaped)
+
+
+def page_reference_pattern(page: str) -> str:
+    """Return citation regex variants for the page format shown in source labels."""
+    escaped_page = re.escape(page.strip())
+    return rf"(?:p\.?\s*{escaped_page}(?!\d)|pages?\s+{escaped_page}(?!\d))"
+
+
+def answer_mentions_source_page(answer: str, source_name: str, page: str) -> bool:
+    """Return True when the final answer cites a specific source label."""
+    if not answer or not source_name:
+        return False
+
+    source_pattern = regex_for_literal_text(source_name)
+    if not re.search(source_pattern, answer, flags=re.IGNORECASE):
+        return False
+
+    if not page or page == "?":
+        return True
+
+    page_pattern = page_reference_pattern(page)
+    return bool(
+        re.search(
+            rf"{source_pattern}.{{0,160}}{page_pattern}|{page_pattern}.{{0,160}}{source_pattern}",
+            answer,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def filter_sources_to_answer_citations(answer: str, sources: list[str]) -> list[str]:
+    """Display only source labels that are cited in the assistant answer."""
+    page_level_matches = []
+    file_level_matches = []
+
+    for source_label in sources:
+        source_name, page = source_label_parts(str(source_label))
+        if not source_name:
+            continue
+
+        source_pattern = regex_for_literal_text(source_name)
+        if not re.search(source_pattern, answer or "", flags=re.IGNORECASE):
+            continue
+
+        file_level_matches.append(source_label)
+        if answer_mentions_source_page(answer, source_name, page):
+            page_level_matches.append(source_label)
+
+    return page_level_matches or file_level_matches
 
 
 def normalize_document_payload(item: dict) -> dict | None:
@@ -952,7 +1016,10 @@ def render_chat_history():
         role = normalize_chat_role(msg.get("role", "assistant"))
         with st.chat_message(role):
             st.markdown(msg.get("content", ""))
-            sources = msg.get("sources", [])
+            sources = filter_sources_to_answer_citations(
+                msg.get("content", ""),
+                msg.get("sources", []),
+            )
             if role == "assistant" and sources:
                 with st.expander("Sources"):
                     for src in sources:
@@ -994,7 +1061,10 @@ def handle_chat_input(chat_container=None):
                             "answer",
                             "Sorry, I could not generate a response.",
                         )
-                        assistant_sources = data.get("sources", [])
+                        assistant_sources = filter_sources_to_answer_citations(
+                            answer,
+                            data.get("sources", []),
+                        )
                         assistant_message_for_history = answer
 
                         st.markdown(answer)
