@@ -128,7 +128,8 @@ download_pdf_from_gcs(bucket_name, blob_name, tmp_path)
 We use LangChain's `PyPDFLoader` to read the PDF page by page, then `RecursiveCharacterTextSplitter` to break the text into overlapping chunks of ~1000 characters. The overlap ensures that sentences split across chunk boundaries still appear in at least one chunk:
 
 ```python
-chunks = extract_and_chunk(tmp_path, source_name=blob_name)
+session_id = extract_session_id_from_object_name(blob_name)
+chunks = extract_and_chunk(tmp_path, source_name=blob_name, session_id=session_id)
 ```
 
 **5. Generate embeddings**
@@ -218,15 +219,16 @@ On the **first** invocation (cold start), the client is created. On all subseque
 
 ## MongoDB Document Shape
 
-Each chunk inserted into the `context` collection has a clean four-field structure:
+Each chunk inserted into the `context` collection has a clean five-field structure:
 
 ```json
 {
   "_id": "ObjectId(...)",
   "textChunk": "The TCP three-way handshake begins with a SYN packet...",
   "vectorEmbedding": [0.012, -0.091, 0.034, "... (768 floats)"],
-  "source": "uploads/networking-lecture-a1b2c3d4.pdf",
-  "page": 11
+  "source": "uploads/123e4567-e89b-12d3-a456-426614174000/networking-lecture-a1b2c3d4.pdf",
+  "page": 11,
+  "session_id": "123e4567-e89b-12d3-a456-426614174000"
 }
 ```
 
@@ -236,8 +238,9 @@ Each chunk inserted into the `context` collection has a clean four-field structu
 | `vectorEmbedding` | 768-dimensional vector from Vertex AI `text-embedding-005` (used for similarity search) |
 | `source` | The GCS object path — used for idempotent delete/replace and citation display |
 | `page` | 0-based page index from PyPDFLoader (the Chat API converts to 1-based for display) |
+| `session_id` | The session folder extracted from the GCS object path — used for retrieval isolation |
 
-This flat layout aligns with how `MongoDBAtlasVectorSearch` builds LangChain `Document` objects on retrieval: every top-level field (other than `textChunk` and `vectorEmbedding`) is mapped directly into `Document.metadata`. So `doc.metadata["source"]` and `doc.metadata["page"]` work without any extra nesting or conversion. All queries — delete, reconcile, status check — use `source` as the single canonical filter field.
+This flat layout keeps ingestion and retrieval simple. The Chat API filters chunks by `session_id`, cites them by `source` + `page`, and status/delete/reconcile operations still use `source` as the canonical object-path field.
 
 ---
 

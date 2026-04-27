@@ -1,6 +1,6 @@
 # SmartStudy Architecture - Developer Deep Dive
 
-Last updated: 2026-04-02
+Last updated: 2026-04-27
 
 This document is the technical reference for the current production setup and data flow.
 
@@ -60,15 +60,18 @@ flowchart TD
     GCS -->|A1. Delete event| CLEAN[Cloud Function Gen2<br/>smartstudy-cleanup]
     CLEAN -->|A2. Delete vectors by source| CTX
 
-    UI -->|B1. Check readiness| STAT[/POST /documents/status/]
-    STAT -->|B2. Count indexed chunks| CTX
-    CTX -->|B3. Return status summary| STAT
-    STAT -->|B4. Update status cards| UI
+    UI -->|B1. Restore docs on refresh| DOCS[/GET /documents/]
+    DOCS -->|B2. List this session's uploads| GCS
+    GCS -->|B3. Return session document list| DOCS
+    UI -->|B4. Poll readiness| STAT[/POST /documents/status/]
+    STAT -->|B5. Count indexed chunks| CTX
+    CTX -->|B6. Return status summary| STAT
+    STAT -->|B7. Update status cards| UI
 
     UI -->|8. Ask question| CHAT[/POST /chat/]
     CHAT -->|9. Receive chat request| API
-    API -->|10a. Standard question: vector search k=5| CTX
-    API -->|10b. /quiz: sample indexed chunks| CTX
+    API -->|10a. Standard question: rank only this session's chunk vectors| CTX
+    API -->|10b. /quiz: sample only this session's indexed chunks| CTX
     CTX -->|11. Return context records| API
     API -->|12. Read or write session history| HIST[(MongoDB chat_history)]
     API -->|13. Generate grounded answer| LLM[Vertex AI Gemini 2.5 Flash]
@@ -98,20 +101,23 @@ flowchart TD
    - extension `.pdf`
    - size <= `MAX_UPLOAD_MB`
 4. Chat API writes each object to:
-   - `gs://smartstudy-pdfs-491919/uploads/<secure_name>-<uuid8>.pdf`
-5. Chat API returns upload metadata including `object_name`, `source_name`, and `upload_id`.
+   - `gs://smartstudy-pdfs-491919/uploads/<session_id>/<secure_name>-<uuid8>.pdf`
+5. Chat API returns upload metadata including `session_id`, `object_name`, `source_name`, and `upload_id`.
 6. GCS emits `object.finalized` events.
 7. `smartstudy-ingest` executes ingestion per uploaded object.
 
-### B) Readiness status path (`POST /documents/status`)
+### B) Document rehydration + readiness path (`GET /documents` + `POST /documents/status`)
 
-1. Streamlit stores uploaded `object_name` values in session state.
-2. While any file is pending, UI polls `POST /documents/status` at `STATUS_POLL_INTERVAL_SECONDS`.
-3. Chat API checks readiness per object by:
+1. Streamlit mirrors the active `session_id` to `?sid=...`.
+2. On page load, the UI calls `GET /documents?session_id=<sid>` once to rebuild the Documents tab from the session-scoped GCS folder.
+3. The Chat API lists objects only from `uploads/<session_id>/...` and returns their current status summary.
+4. Streamlit stores those `object_name` values in session state.
+5. While any file is pending, UI polls `POST /documents/status` at `STATUS_POLL_INTERVAL_SECONDS`.
+6. Chat API checks readiness per object by:
    - counting matching chunks in Mongo `context`
    - optionally checking object existence in GCS
-4. Chat API returns per-document status (`ready`, `processing`, `not_found`, `invalid`) plus summary counts.
-5. UI updates each document card in real time until ingestion is complete.
+7. Chat API returns per-document status (`ready`, `processing`, `not_found`, `invalid`) plus summary counts.
+8. UI updates each document card in real time until ingestion is complete.
 
 ### C) Ingestion path (`smartstudy-ingest`)
 
@@ -125,7 +131,7 @@ Pipeline in `cloud_function/main.py -> process_pdf`:
 4. Generate embeddings in batches of 250 using Vertex AI.
 5. Enforce idempotency per object path:
    - `delete_vectors_for_source(blob_name)` before insert.
-6. Insert chunk docs into Mongo `context`.
+6. Insert chunk docs into Mongo `context`, including the extracted `session_id`.
 7. Reuse shared module-level MongoDB and GCS clients inside the warm function instance to avoid rebuilding clients on every helper call.
 8. Reconcile stale vectors against current bucket content:
    - remove docs whose `source` no longer exists in GCS.
@@ -145,8 +151,8 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 
 1. Read user question and `session_id`.
 2. Choose retrieval strategy:
-   - normal questions: retrieve top-k (`k=5`) chunks from Mongo vector search
-   - `/quiz`: randomly sample 10 indexed chunk records from Mongo `context`
+   - normal questions: load this session's indexed chunks and rank them by cosine similarity against the current query embedding
+   - `/quiz`: randomly sample 10 indexed chunk records from Mongo `context` for this same session only
 3. Normalize source/page metadata for citations.
 4. Compose prompt:
    - system tutor persona
@@ -157,15 +163,16 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
    - `answer`
    - deduplicated `sources` list
 
-### F) Session history rehydration (`GET /history` + UI `sid`)
+### F) Session rehydration (`GET /history` + `GET /documents` + UI `sid`)
 
 1. Streamlit keeps a stable `session_id` and mirrors it to `?sid=...`.
 2. On page load, UI calls `GET /history?session_id=<sid>` once.
-3. Chat API reads `MongoDBChatMessageHistory` from `chat_history`.
-4. API normalizes message roles to `user` / `assistant` and returns a JSON list.
-5. UI rehydrates the conversation before rendering chat messages.
-6. If URL `sid` changes or is absent, UI intentionally starts a new session.
-7. Temporary transport errors in the UI are not persisted as assistant messages.
+3. On that same page load, UI also calls `GET /documents?session_id=<sid>` once.
+4. Chat API reads `MongoDBChatMessageHistory` from `chat_history`.
+5. Chat API lists GCS objects only from the active session folder.
+6. UI rehydrates both the conversation and the Documents tab before rendering them.
+7. If URL `sid` changes or is absent, UI intentionally starts a new session with empty chat and empty document state.
+8. Temporary transport errors in the UI are not persisted as assistant messages.
 
 ## 4) Data Model (Current)
 
@@ -176,13 +183,14 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
   "_id": "ObjectId(...)",
   "textChunk": "chunk text",
   "vectorEmbedding": [0.012, -0.091, "..."],
-  "source": "uploads/my-file-a1b2c3d4.pdf",
-  "page": 3
+  "source": "uploads/123e4567-e89b-12d3-a456-426614174000/my-file-a1b2c3d4.pdf",
+  "page": 3,
+  "session_id": "123e4567-e89b-12d3-a456-426614174000"
 }
 ```
 
 Notes:
-- `source` and `page` are flat top-level fields — `MongoDBAtlasVectorSearch` maps them directly into `Document.metadata` on retrieval.
+- `source`, `page`, and `session_id` are stored at the top level for simple filtering and status checks.
 - `page` is stored as the raw 0-based index from PyPDFLoader; the Chat API's `_normalize_page_display()` converts to 1-based for citations.
 
 ### MongoDB `chat_history`
@@ -202,14 +210,21 @@ gcloud functions describe smartstudy-ingest --gen2 --region=europe-west1 --proje
 gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --project=smart-study-491919
 ```
 
+### List session documents via API
+
+```bash
+curl "https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app/documents?session_id=YOUR_SESSION_ID"
+```
+
 ### Check document readiness via API
 
 ```bash
 curl -X POST "https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app/documents/status" \
   -H "Content-Type: application/json" \
   -d '{
+    "session_id": "YOUR_SESSION_ID",
     "documents": [
-      { "object_name": "uploads/example-a1b2c3d4.pdf" }
+      { "object_name": "uploads/YOUR_SESSION_ID/example-a1b2c3d4.pdf" }
     ]
   }'
 ```
@@ -217,14 +232,14 @@ curl -X POST "https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app/documents/stat
 ### Trigger ingestion manually
 
 ```bash
-gcloud storage cp my.pdf gs://smartstudy-pdfs-491919/uploads/my.pdf --project=smart-study-491919
+gcloud storage cp my.pdf gs://smartstudy-pdfs-491919/uploads/YOUR_SESSION_ID/my.pdf --project=smart-study-491919
 gcloud functions logs read smartstudy-ingest --region=europe-west1 --limit=100
 ```
 
 ### Trigger cleanup manually
 
 ```bash
-gcloud storage rm gs://smartstudy-pdfs-491919/uploads/my.pdf --project=smart-study-491919
+gcloud storage rm gs://smartstudy-pdfs-491919/uploads/YOUR_SESSION_ID/my.pdf --project=smart-study-491919
 gcloud functions logs read smartstudy-cleanup --region=europe-west1 --limit=100
 ```
 
@@ -261,11 +276,11 @@ gcloud functions deploy smartstudy-cleanup \
 ## 6) Current Caveats and Planned Improvements
 
 - Session continuity is URL-session based (`sid`) rather than account-based identity.
-- Anyone with the same `sid` can view the same session history; authentication is not enforced yet.
+- Anyone with the same `sid` can view the same chat history and session document namespace; authentication is not enforced yet.
 - Source list may include multiple active files if user uploads several PDFs; expected behavior.
 - Readiness polling is inferred from indexed chunk presence and storage checks, so status is near-real-time but event-driven.
 - `reconcile_context_with_bucket()` still performs a full bucket + collection consistency scan after each upload as a safety net; useful for resilience at demo scale, but not the most scalable long-term design.
 - Optional future hardening:
-  - add document ownership filtering
+  - add authenticated document ownership instead of URL-session isolation alone
   - add a dedicated documents-status collection for richer pipeline states
   - migrate deprecated embedding wrapper if required by future LangChain versions

@@ -20,7 +20,6 @@ from google.cloud import storage
 from werkzeug.utils import secure_filename
 
 from langchain_google_vertexai import ChatVertexAI, VertexAIEmbeddings
-from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_mongodb.chat_message_histories import MongoDBChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -72,8 +71,8 @@ Context from the lecture notes:
 # Initialise singletons
 # ---------------------------------------------------------------------------
 mongo_client: MongoClient | None = None
-vector_store: MongoDBAtlasVectorSearch | None = None
 storage_client: storage.Client | None = None
+embeddings_model: VertexAIEmbeddings | None = None
 rag_chain = None
 
 
@@ -105,6 +104,33 @@ def _normalize_page_display(raw_page):
     return "?"
 
 
+def normalize_session_id(raw_session_id: str) -> str:
+    """Normalize a session id for safe path construction and storage."""
+    return secure_filename((raw_session_id or "").strip())
+
+
+def build_session_upload_prefix(session_id: str) -> str:
+    """Return the session-scoped upload prefix in GCS."""
+    clean_prefix = GCS_UPLOAD_PREFIX.strip("/")
+    if clean_prefix:
+        return f"{clean_prefix}/{session_id}"
+    return session_id
+
+
+def extract_session_id_from_object_name(object_name: str) -> str:
+    """Extract the session folder immediately above the filename."""
+    path_parts = [part for part in (object_name or "").split("/") if part]
+    if len(path_parts) < 2:
+        return ""
+    return path_parts[-2]
+
+
+def _display_source_name(source: str) -> str:
+    """Return a user-facing filename for citations and status cards."""
+    clean_source = (source or "").strip()
+    return os.path.basename(clean_source) or clean_source or "unknown"
+
+
 def _extract_source_and_page(doc):
     """Extract source and page from a LangChain Document's metadata."""
     metadata = doc.metadata or {}
@@ -127,12 +153,13 @@ def _is_quiz_command(question: str) -> bool:
     return question.strip().lower() == "/quiz"
 
 
-def _sample_quiz_records(sample_size: int = 10) -> list[dict]:
+def _sample_quiz_records(session_id: str, sample_size: int = 10) -> list[dict]:
     """Fetch a small random sample of indexed chunks for quiz generation."""
     collection = get_context_collection()
     pipeline = [
         {
             "$match": {
+                "session_id": session_id,
                 "textChunk": {
                     "$exists": True,
                     "$type": "string",
@@ -161,21 +188,103 @@ def _build_context_and_sources(retrieved_docs) -> tuple[str, list[str]]:
         if not content:
             continue
 
-        context_parts.append(f"[Source: {source}, Page: {page}]\n{content}")
-        source_labels.add(f"{source} (p.{page})")
+        display_source = _display_source_name(source)
+        context_parts.append(f"[Source: {display_source}, Page: {page}]\n{content}")
+        source_labels.add(f"{display_source} (p.{page})")
 
     return "\n\n---\n\n".join(context_parts), sorted(source_labels)
 
 
-def retrieve_context_for_question(question: str) -> tuple[str, list[str]]:
-    """Retrieve context differently for standard chat and quiz mode."""
+def get_embeddings_model() -> VertexAIEmbeddings:
+    """Return a shared Vertex AI embeddings client."""
+    global embeddings_model
+    if embeddings_model is None:
+        embeddings_model = VertexAIEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            project=GCP_PROJECT_ID,
+            location=GCP_REGION,
+        )
+    return embeddings_model
+
+
+def _session_chunk_filter(session_id: str) -> dict:
+    """Return a MongoDB filter matching indexed chunks for one session."""
+    return {
+        "session_id": session_id,
+        "textChunk": {"$exists": True, "$type": "string", "$ne": ""},
+        "vectorEmbedding": {"$exists": True, "$type": "array"},
+    }
+
+
+def _cosine_similarity(query_vector: list[float], candidate_vector) -> float:
+    """Compute cosine similarity between two embedding vectors."""
+    if not isinstance(candidate_vector, list) or not candidate_vector:
+        return float("-inf")
+
+    dot_product = 0.0
+    query_norm = 0.0
+    candidate_norm = 0.0
+
+    for query_value, candidate_value in zip(query_vector, candidate_vector):
+        query_float = float(query_value)
+        candidate_float = float(candidate_value)
+        dot_product += query_float * candidate_float
+        query_norm += query_float * query_float
+        candidate_norm += candidate_float * candidate_float
+
+    if query_norm <= 0.0 or candidate_norm <= 0.0:
+        return float("-inf")
+
+    return dot_product / ((query_norm ** 0.5) * (candidate_norm ** 0.5))
+
+
+def _rank_session_records_by_similarity(
+    question: str,
+    session_id: str,
+    limit: int = 5,
+) -> list[dict]:
+    """Rank one session's stored chunk vectors against the current question."""
+    collection = get_context_collection()
+    records = list(
+        collection.find(
+            _session_chunk_filter(session_id),
+            {
+                "_id": 0,
+                "textChunk": 1,
+                "vectorEmbedding": 1,
+                "source": 1,
+                "page": 1,
+                "session_id": 1,
+            },
+        )
+    )
+    if not records:
+        return []
+
+    query_vector = get_embeddings_model().embed_query(question)
+    scored_records = []
+
+    for record in records:
+        score = _cosine_similarity(query_vector, record.get("vectorEmbedding"))
+        if score == float("-inf"):
+            continue
+        scored_records.append((score, record))
+
+    scored_records.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {key: value for key, value in record.items() if key != "vectorEmbedding"}
+        for _, record in scored_records[:limit]
+    ]
+
+
+def retrieve_context_for_question(question: str, session_id: str) -> tuple[str, list[str]]:
+    """Retrieve session-scoped context for standard chat and quiz mode."""
     if _is_quiz_command(question):
-        sampled_records = _sample_quiz_records(sample_size=10)
+        sampled_records = _sample_quiz_records(session_id=session_id, sample_size=10)
         return _build_context_and_sources(sampled_records)
 
-    vs = get_vector_store()
-    docs = vs.similarity_search(question, k=5)
-    return _build_context_and_sources(docs)
+    ranked_records = _rank_session_records_by_similarity(question, session_id, limit=5)
+    return _build_context_and_sources(ranked_records)
 
 
 def get_mongo_client() -> MongoClient:
@@ -200,26 +309,6 @@ def get_context_collection():
     """Return the MongoDB collection that stores document chunks."""
     client = get_mongo_client()
     return client[MONGODB_DB_NAME][MONGODB_COLLECTION]
-
-
-def get_vector_store() -> MongoDBAtlasVectorSearch:
-    """Return the LangChain vector store backed by MongoDB Atlas."""
-    global vector_store
-    if vector_store is None:
-        embeddings = VertexAIEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            project=GCP_PROJECT_ID,
-            location=GCP_REGION,
-        )
-        collection = get_context_collection()
-        vector_store = MongoDBAtlasVectorSearch(
-            collection=collection,
-            embedding=embeddings,
-            index_name=MONGODB_VECTOR_INDEX_NAME,
-            text_key="textChunk",
-            embedding_key="vectorEmbedding",
-        )
-    return vector_store
 
 
 def get_session_history(session_id: str) -> MongoDBChatMessageHistory:
@@ -317,27 +406,32 @@ def build_rag_chain():
     return rag_chain
 
 
-def build_upload_object_name(original_filename: str) -> str:
+def build_upload_object_name(original_filename: str, session_id: str) -> str:
     """Create a unique object path for an uploaded PDF."""
     safe_name = secure_filename(original_filename)
     unique_suffix = uuid.uuid4().hex[:8]
     base_name, ext = os.path.splitext(safe_name)
     object_name = f"{base_name}-{unique_suffix}{ext}"
-    if GCS_UPLOAD_PREFIX:
-        object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{object_name}"
-    return object_name
+    return f"{build_session_upload_prefix(session_id)}/{object_name}"
 
 
-def _document_source_filter(object_name: str) -> dict:
+def _document_source_filter(object_name: str, session_id: str | None = None) -> dict:
     """Build a MongoDB filter matching documents by their source path."""
-    return {"source": object_name}
+    filter_doc = {"source": object_name}
+    if session_id:
+        filter_doc["session_id"] = session_id
+    return filter_doc
 
 
-def get_document_status(object_name: str, source_name: str | None = None) -> dict:
+def get_document_status(
+    object_name: str,
+    source_name: str | None = None,
+    session_id: str | None = None,
+) -> dict:
     """Return ingestion readiness for a previously uploaded PDF."""
     checked_at = datetime.now(timezone.utc).isoformat()
     clean_object_name = (object_name or "").strip()
-    label = source_name or os.path.basename(clean_object_name)
+    label = source_name or _display_source_name(clean_object_name)
 
     if not clean_object_name:
         return {
@@ -351,8 +445,22 @@ def get_document_status(object_name: str, source_name: str | None = None) -> dic
             "message": "Missing object_name.",
         }
 
+    if session_id and extract_session_id_from_object_name(clean_object_name) != session_id:
+        return {
+            "object_name": clean_object_name,
+            "source_name": label or _display_source_name(clean_object_name),
+            "status": "invalid",
+            "ready": False,
+            "chunk_count": 0,
+            "exists_in_storage": None,
+            "checked_at": checked_at,
+            "message": "Document does not belong to the active session.",
+        }
+
     collection = get_context_collection()
-    chunk_count = collection.count_documents(_document_source_filter(clean_object_name))
+    chunk_count = collection.count_documents(
+        _document_source_filter(clean_object_name, session_id=session_id)
+    )
 
     exists_in_storage = None
     if GCS_BUCKET_NAME:
@@ -377,7 +485,7 @@ def get_document_status(object_name: str, source_name: str | None = None) -> dic
 
     return {
         "object_name": clean_object_name,
-        "source_name": label or os.path.basename(clean_object_name),
+        "source_name": label or _display_source_name(clean_object_name),
         "status": status,
         "ready": ready,
         "chunk_count": chunk_count,
@@ -407,7 +515,7 @@ def parse_status_documents(payload: dict) -> list[dict]:
     for document in documents:
         if isinstance(document, str):
             normalized_documents.append(
-                {"object_name": document, "source_name": os.path.basename(document)}
+                {"object_name": document, "source_name": _display_source_name(document)}
             )
             continue
 
@@ -428,6 +536,46 @@ def parse_status_documents(payload: dict) -> list[dict]:
         )
 
     return normalized_documents
+
+
+def summarize_document_statuses(statuses: list[dict]) -> dict:
+    """Build the document-status summary payload used by the API."""
+    ready_count = sum(1 for item in statuses if item["ready"])
+    processing_count = sum(1 for item in statuses if item["status"] == "processing")
+    not_found_count = sum(1 for item in statuses if item["status"] == "not_found")
+    invalid_count = sum(1 for item in statuses if item["status"] == "invalid")
+    return {
+        "total": len(statuses),
+        "ready": ready_count,
+        "processing": processing_count,
+        "not_found": not_found_count,
+        "invalid": invalid_count,
+        "all_ready": ready_count == len(statuses) and len(statuses) > 0,
+    }
+
+
+def list_session_documents(session_id: str) -> list[dict]:
+    """List uploaded PDFs for one session directly from the storage namespace."""
+    if not session_id or not GCS_BUCKET_NAME:
+        return []
+
+    bucket = get_storage_client().bucket(GCS_BUCKET_NAME)
+    prefix = f"{build_session_upload_prefix(session_id).rstrip('/')}/"
+    listed_documents = []
+
+    for blob in bucket.list_blobs(prefix=prefix):
+        if not blob.name or not blob.name.lower().endswith(".pdf"):
+            continue
+        listed_documents.append(
+            get_document_status(
+                object_name=blob.name,
+                source_name=_display_source_name(blob.name),
+                session_id=session_id,
+            )
+        )
+
+    listed_documents.sort(key=lambda item: item.get("source_name", "").lower())
+    return listed_documents
 
 
 # ---------------------------------------------------------------------------
@@ -451,14 +599,14 @@ def chat():
     """
     body = request.get_json(silent=True) or {}
     question = body.get("question", "").strip()
-    session_id = body.get("session_id", "default")
+    session_id = normalize_session_id(body.get("session_id", "")) or "default"
 
     if not question:
         return jsonify({"error": "No question provided"}), 400
 
     try:
         # 1. Retrieve relevant context using a dedicated path for quiz mode.
-        context_text, sources = retrieve_context_for_question(question)
+        context_text, sources = retrieve_context_for_question(question, session_id)
 
         # 2. Run the RAG chain with conversation history
         chain = build_rag_chain()
@@ -484,6 +632,10 @@ def upload():
     if not GCS_BUCKET_NAME:
         return jsonify({"error": "GCS_BUCKET_NAME is not configured"}), 500
 
+    session_id = normalize_session_id(request.form.get("session_id", ""))
+    if not session_id:
+        return jsonify({"error": "Missing session_id."}), 400
+
     uploaded_file = request.files.get("file")
     if uploaded_file is None:
         return jsonify({"error": "No file provided. Use form field name 'file'."}), 400
@@ -504,13 +656,17 @@ def upload():
     if len(file_bytes) > max_upload_bytes:
         return jsonify({"error": f"File too large. Max size is {MAX_UPLOAD_MB} MB."}), 413
 
-    object_name = build_upload_object_name(safe_name)
+    object_name = build_upload_object_name(safe_name, session_id)
     upload_id = uuid.uuid4().hex
 
     try:
         client = get_storage_client()
         bucket = client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(object_name)
+        blob.metadata = {
+            "session_id": session_id,
+            "original_name": original_name,
+        }
         blob.upload_from_string(file_bytes, content_type="application/pdf")
 
         return jsonify(
@@ -518,6 +674,7 @@ def upload():
                 "status": "uploaded",
                 "message": "PDF uploaded. Ingestion will start automatically.",
                 "upload_id": upload_id,
+                "session_id": session_id,
                 "bucket": GCS_BUCKET_NAME,
                 "object_name": object_name,
                 "source_name": os.path.basename(object_name),
@@ -532,6 +689,27 @@ def upload():
         return jsonify({"error": "Upload failed", "detail": str(e)}), 500
 
 
+@app.route("/documents", methods=["GET"])
+def list_documents():
+    """GET /documents?session_id=... - Return this session's uploaded PDFs."""
+    session_id = normalize_session_id(request.args.get("session_id", ""))
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    try:
+        documents = list_session_documents(session_id)
+        return jsonify(
+            {
+                "session_id": session_id,
+                "documents": documents,
+                "summary": summarize_document_statuses(documents),
+            }
+        )
+    except Exception as exc:
+        print(f"❌ Error in GET /documents: {exc}")
+        return jsonify({"error": "Internal server error", "detail": str(exc)}), 500
+
+
 @app.route("/documents/status", methods=["POST"])
 def document_status():
     """
@@ -541,31 +719,22 @@ def document_status():
     """
     try:
         body = request.get_json(silent=True) or {}
+        session_id = normalize_session_id(body.get("session_id", ""))
         documents = parse_status_documents(body)
         statuses = [
             get_document_status(
                 object_name=document["object_name"],
                 source_name=document.get("source_name"),
+                session_id=session_id or None,
             )
             for document in documents
         ]
 
-        ready_count = sum(1 for item in statuses if item["ready"])
-        processing_count = sum(1 for item in statuses if item["status"] == "processing")
-        not_found_count = sum(1 for item in statuses if item["status"] == "not_found")
-        invalid_count = sum(1 for item in statuses if item["status"] == "invalid")
-
         return jsonify(
             {
+                "session_id": session_id or None,
                 "documents": statuses,
-                "summary": {
-                    "total": len(statuses),
-                    "ready": ready_count,
-                    "processing": processing_count,
-                    "not_found": not_found_count,
-                    "invalid": invalid_count,
-                    "all_ready": ready_count == len(statuses) and len(statuses) > 0,
-                },
+                "summary": summarize_document_statuses(statuses),
             }
         )
     except ValueError as exc:

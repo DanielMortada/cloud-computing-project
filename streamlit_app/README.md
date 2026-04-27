@@ -78,6 +78,7 @@ flowchart TD
 
     UI -->|"POST /upload"| API
     UI -->|"POST /chat"| API
+    UI -->|"GET /documents"| API
     UI -->|"POST /documents/status"| API
     UI -->|"GET /history"| API
     UI -->|"DELETE /history"| API
@@ -113,6 +114,9 @@ sequenceDiagram
     UI->>API: GET /history?session_id=abc123
     API-->>UI: Previous conversation messages
     UI->>UI: hydrate_chat_history_once() — populate message list
+    UI->>API: GET /documents?session_id=abc123
+    API-->>UI: Previous session documents
+    UI->>UI: hydrate_documents_once() — repopulate uploaded_documents
 
     Note over Student,UI: 2. Upload PDFs
     Student->>UI: Selects PDF files in sidebar
@@ -151,7 +155,7 @@ sequenceDiagram
 Every user session gets a unique `session_id` (UUID). This ID is:
 - Stored in Streamlit's `st.session_state`
 - Mirrored to the browser URL as `?sid=...`
-- Sent with every API request to maintain conversation continuity
+- Sent with every API request to maintain conversation continuity and document isolation
 
 ```python
 def init_session_state():
@@ -160,7 +164,7 @@ def init_session_state():
         st.session_state.session_id = query_session_id or str(uuid.uuid4())
 ```
 
-If you copy the URL and open it in another tab, you get the same conversation. If you click "New Session", a fresh UUID is generated and the history is cleared.
+If you copy the URL and open it in another tab, you get the same conversation and the same session-scoped Documents list. If you click "New Session", a fresh UUID is generated and both chat and document state reset.
 
 ### History Rehydration
 
@@ -180,11 +184,29 @@ def hydrate_chat_history_once():
 
 The `history_hydrated` flag ensures we don't reload history on every Streamlit re-run (which happens on every interaction).
 
+### Document Rehydration
+
+On that same page load, the app calls `GET /documents` exactly once to restore the current session's uploaded files:
+
+```python
+def hydrate_documents_once():
+    if st.session_state.documents_hydrated:
+        return
+    response = requests.get(
+        f"{CHAT_API_URL}/documents",
+        params={"session_id": st.session_state.session_id},
+    )
+    # ... populate st.session_state.uploaded_documents
+    st.session_state.documents_hydrated = True
+```
+
+This is what keeps the Documents tab populated after a browser refresh for the same `sid`.
+
 ### File Upload Flow
 
 The sidebar contains a file uploader widget. When the user clicks "Upload selected PDFs":
 
-1. Each file is sent individually to `POST /upload` via `requests.post`
+1. Each file is sent individually to `POST /upload` via `requests.post`, together with the active `session_id`
 2. Successful uploads are tracked in `st.session_state.uploaded_documents`
 3. The UI immediately starts polling for ingestion status
 
@@ -283,6 +305,7 @@ Streamlit re-runs the entire script on every interaction. To persist data across
 | `messages` | List of `{role, content, sources?}` dicts — the conversation |
 | `session_id` | UUID identifying this conversation session |
 | `history_hydrated` | Boolean flag — have we loaded history from the API yet? |
+| `documents_hydrated` | Boolean flag — have we restored the session's document list yet? |
 | `uploaded_documents` | List of upload metadata dicts with status info |
 | `upload_feedback` | Success/warning/error message from the last upload batch |
 | `uploader_key` | Counter that resets the file uploader widget after upload |

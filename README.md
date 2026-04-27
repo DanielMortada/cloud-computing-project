@@ -2,7 +2,7 @@
 
 > INFO-H505 Cloud Computing Project - ULB 2025-2026
 
-SmartStudy is a cloud-native study assistant for lecture PDFs. A student batch-uploads PDFs in the Streamlit UI, the Chat API stores them in Google Cloud Storage through `POST /upload`, GCS events trigger ingestion and cleanup functions, and the chat backend answers questions with grounded citations from MongoDB Atlas.
+SmartStudy is a cloud-native study assistant for lecture PDFs. A student batch-uploads PDFs in the Streamlit UI, the Chat API stores them in a session-scoped folder in Google Cloud Storage through `POST /upload`, GCS events trigger ingestion and cleanup functions, and the chat backend answers questions with grounded citations from MongoDB Atlas.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ High-level flow:
 5. The ingest function extracts text, chunks it, creates embeddings, and stores vectors in MongoDB Atlas.
 6. The user asks a question in the UI.
 7. The UI calls the Chat API chat endpoint.
-8. The API runs vector search, builds the prompt, and returns a grounded answer with citations.
+8. The API loads only the active session's chunks, ranks them by embedding similarity, builds the prompt, and returns a grounded answer with citations.
 9. If a PDF is deleted from GCS, the cleanup function removes its vectors from MongoDB.
 
 For diagrams and deeper implementation notes, see:
@@ -165,15 +165,16 @@ gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --proj
 2. Confirm the file appears in GCS.
 3. Watch the ingest function logs.
 4. Ask a question in the UI and verify the answer includes sources.
-5. Refresh the UI and confirm the same `sid` URL keeps the same chat history.
-6. Delete a PDF from GCS and confirm the cleanup function removes its vectors.
+5. Refresh the UI and confirm the same `sid` URL keeps both the same chat history and the same Documents list.
+6. Click `New Session` and confirm both chat and Documents start empty for the new `sid`.
+7. Delete a PDF from GCS and confirm the cleanup function removes its vectors.
 
 Useful commands:
 
 ```bash
-gcloud storage cp my-lecture.pdf gs://YOUR_BUCKET_NAME/uploads/my-lecture.pdf
+gcloud storage cp my-lecture.pdf gs://YOUR_BUCKET_NAME/uploads/YOUR_SESSION_ID/my-lecture.pdf
 gcloud functions logs read smartstudy-ingest --region=europe-west1 --limit=100
-gcloud storage rm gs://YOUR_BUCKET_NAME/uploads/my-lecture.pdf
+gcloud storage rm gs://YOUR_BUCKET_NAME/uploads/YOUR_SESSION_ID/my-lecture.pdf
 gcloud functions logs read smartstudy-cleanup --region=europe-west1 --limit=100
 ```
 
@@ -209,10 +210,12 @@ Create a vector search index named `vector_index` on the `context` collection. T
 ## Current Notes
 
 - Uploads are handled by the Chat API through `/upload`, not by direct browser-to-GCS writes.
+- Each upload is namespaced under `uploads/<session_id>/...`, which isolates one session's study materials from another.
 - Ingestion is event-driven and reproducible: a finalized object in GCS is what starts PDF processing.
 - Cleanup is also event-driven: deleting a PDF from GCS removes its stored vectors.
 - Chat memory is persisted in MongoDB and restored on refresh using session-aware history hydration (`sid` + `GET /history`).
-- Opening the app with a new or missing `sid` starts a new session by design.
+- The Documents tab is also restored on refresh through session-aware document hydration (`sid` + `GET /documents`).
+- Opening the app with a new or missing `sid` starts a new session by design, with an empty chat and an empty Documents pane.
 
 ## Team
 

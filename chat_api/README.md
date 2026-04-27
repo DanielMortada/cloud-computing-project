@@ -72,7 +72,7 @@ Here's what happens from the moment a user sends a question to the moment they s
 sequenceDiagram
     participant UI as Streamlit UI
     participant API as Flask Chat API
-    participant VS as MongoDB Atlas<br/>Vector Search
+    participant VS as MongoDB Atlas<br/>Session Chunks
     participant HIST as MongoDB<br/>Chat History
     participant EMB as Vertex AI<br/>Embeddings
     participant LLM as Vertex AI<br/>Gemini 2.5 Flash
@@ -82,10 +82,11 @@ sequenceDiagram
     alt Standard question
         API->>EMB: Embed the user question
         EMB-->>API: 768-dim query vector
-        API->>VS: Vector similarity search (k=5)
+        API->>VS: Load this session's indexed chunks
+        API->>API: Rank by cosine similarity (k=5)
         VS-->>API: Top 5 most relevant chunks
     else /quiz command
-        API->>VS: $sample 10 random indexed chunks
+        API->>VS: $sample 10 random indexed chunks for this session
         VS-->>API: 10 random chunks (broad coverage)
     end
 
@@ -110,45 +111,44 @@ sequenceDiagram
 def chat():
     body = request.get_json(silent=True) or {}
     question = body.get("question", "").strip()
-    session_id = body.get("session_id", "default")
+    session_id = normalize_session_id(body.get("session_id", "")) or "default"
 ```
 
 The UI sends a JSON body with two fields: the user's `question` and a `session_id` that ties together the conversation history.
 
 **2. Retrieval — choosing the right strategy**
 
-Not all queries should be handled the same way. The function `retrieve_context_for_question()` routes between two paths:
+Not all queries should be handled the same way. The function `retrieve_context_for_question()` routes between two session-scoped paths:
 
 ```python
-def retrieve_context_for_question(question: str) -> tuple[str, list[str]]:
+def retrieve_context_for_question(question: str, session_id: str) -> tuple[str, list[str]]:
     if _is_quiz_command(question):
-        sampled_records = _sample_quiz_records(sample_size=10)
+        sampled_records = _sample_quiz_records(session_id=session_id, sample_size=10)
         return _build_context_and_sources(sampled_records)
 
-    vs = get_vector_store()
-    docs = vs.similarity_search(question, k=5)
-    return _build_context_and_sources(docs)
+    ranked_records = _rank_session_records_by_similarity(question, session_id, limit=5)
+    return _build_context_and_sources(ranked_records)
 ```
 
-- **Standard questions** → the question text is embedded into a 768-dim vector and compared against all stored chunk vectors using **cosine similarity**. The top 5 most similar chunks are returned. This is powered by **MongoDB Atlas Vector Search**.
+- **Standard questions** → the question text is embedded into a 768-dim vector and compared only against chunk vectors that belong to the active `session_id`, using **cosine similarity**. The top 5 most similar chunks are returned.
 
-- **`/quiz` command** → vector search on the literal string "/quiz" would be meaningless (no document chunk is semantically similar to the word "quiz"). Instead, we use MongoDB's `$sample` aggregation stage to randomly pick 10 chunks, giving Gemini broad material to generate a diverse quiz.
+- **`/quiz` command** → vector search on the literal string "/quiz" would be meaningless (no document chunk is semantically similar to the word "quiz"). Instead, we use MongoDB's `$sample` aggregation stage to randomly pick 10 chunks from the active session, giving Gemini broad material to generate a diverse quiz.
 
-**3. Vector search — how it works under the hood**
+**3. Session-scoped similarity ranking — how it works under the hood**
 
-MongoDB Atlas Vector Search maintains a special index (`vector_index`) on the `vectorEmbedding` field of the `context` collection. When we call `similarity_search()`, LangChain:
+To guarantee isolation between sessions without relying on a shared cross-session retrieval call, the Chat API:
 
 1. Sends the user's question to Vertex AI's `text-embedding-005` model
-2. Receives a 768-dimensional vector back
-3. Passes that vector to MongoDB's `$vectorSearch` aggregation stage
-4. MongoDB compares it against all stored vectors using cosine similarity
-5. Returns the top-k documents, ranked by relevance
+2. Receives a 768-dimensional query vector back
+3. Loads only chunk records whose `session_id` matches the active session
+4. Compares the query vector against those stored vectors using cosine similarity
+5. Returns the top-k records, ranked by relevance
 
 ```mermaid
 flowchart LR
     Q["User question:<br/>'Explain TCP handshake'"]
     E["Vertex AI embeds it<br/>→ [0.02, -0.11, 0.07, ...]"]
-    IDX["MongoDB vector_index<br/>compares against all<br/>stored embeddings"]
+    IDX["MongoDB context collection<br/>filtered to one session"]
     R["Top 5 chunks<br/>sorted by cosine similarity"]
 
     Q --> E --> IDX --> R
@@ -225,7 +225,7 @@ rag_chain = RunnableWithMessageHistory(
 
 The Chat API needs to extract citation metadata (source filename and page number) from retrieved chunks to display references like _"lecture3.pdf, p.5"_.
 
-Because we store `source` and `page` as **flat top-level fields** in MongoDB (alongside `textChunk` and `vectorEmbedding`), `MongoDBAtlasVectorSearch` maps them directly into `Document.metadata` on retrieval. This makes extraction trivial:
+Because we store `source`, `page`, and `session_id` as **flat top-level fields** in MongoDB (alongside `textChunk` and `vectorEmbedding`), extraction and filtering stay simple:
 
 ```python
 def _extract_source_and_page(doc):
@@ -252,7 +252,7 @@ Both functions read the same flat fields — no nesting, no fallback chains, no 
 
 ---
 
-The Chat API isn't just a chat endpoint — it also handles file uploads, document status checks, and history management:
+The Chat API isn't just a chat endpoint — it also handles session-scoped file uploads, document listing/status checks, and history management:
 
 ```mermaid
 flowchart TD
@@ -260,6 +260,7 @@ flowchart TD
         H["GET /"]
         C["POST /chat"]
         U["POST /upload"]
+        D["GET /documents"]
         S["POST /documents/status"]
         RH["GET /history"]
         DH["DELETE /history"]
@@ -268,9 +269,10 @@ flowchart TD
     H -->|"Health check"| R1["{ status: 'ok' }"]
     C -->|"RAG question answering"| R2["{ answer, sources }"]
     U -->|"Upload PDF → GCS"| R3["{ object_name, status }"]
-    S -->|"Check ingestion readiness"| R4["{ documents: [...], summary }"]
-    RH -->|"Retrieve session messages"| R5["{ messages: [...] }"]
-    DH -->|"Clear session history"| R6["{ status: 'cleared' }"]
+    D -->|"Restore session docs"| R4["{ documents: [...], summary }"]
+    S -->|"Check ingestion readiness"| R5["{ documents: [...], summary }"]
+    RH -->|"Retrieve session messages"| R6["{ messages: [...] }"]
+    DH -->|"Clear session history"| R7["{ status: 'cleared' }"]
 
     style H fill:#E6F4EA,stroke:#34A853,color:#188038
     style C fill:#FCE8E6,stroke:#EA4335,color:#C5221F
@@ -282,12 +284,16 @@ flowchart TD
 
 ### `POST /upload` — File upload gateway
 
-The UI sends PDFs here. The API validates the file (PDF only, ≤ 25 MB, non-empty), generates a unique object name, and uploads it to GCS. This triggers the Cloud Function ingestion pipeline automatically:
+The UI sends PDFs here together with a `session_id`. The API validates the file (PDF only, ≤ 25 MB, non-empty), generates a unique object name inside the active session folder, and uploads it to GCS. This triggers the Cloud Function ingestion pipeline automatically:
 
 ```python
-object_name = f"{GCS_UPLOAD_PREFIX}/{base_name}-{uuid8}.pdf"
+object_name = f"{GCS_UPLOAD_PREFIX}/{session_id}/{base_name}-{uuid8}.pdf"
 blob.upload_from_string(file_bytes, content_type="application/pdf")
 ```
+
+### `GET /documents` — Session document rehydration
+
+The UI calls this endpoint on page load to rebuild the Documents tab after a refresh. The API lists objects only from the active session folder and returns their latest status summary.
 
 ### `POST /documents/status` — Ingestion readiness polling
 
@@ -333,8 +339,7 @@ LangChain is the glue that ties together retrieval, prompting, LLM calls, and me
 
 | LangChain Component | What It Does in SmartStudy |
 |---|---|
-| `MongoDBAtlasVectorSearch` | Wraps MongoDB as a vector retriever |
-| `VertexAIEmbeddings` | Generates query vectors via Vertex AI |
+| `VertexAIEmbeddings` | Generates both stored chunk embeddings and query vectors |
 | `ChatVertexAI` | Sends prompts to Gemini 2.5 Flash |
 | `ChatPromptTemplate` | Structures the system + history + question prompt |
 | `MongoDBChatMessageHistory` | Persists conversation turns in MongoDB |

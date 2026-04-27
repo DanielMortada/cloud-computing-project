@@ -76,6 +76,9 @@ def init_session_state():
     if "history_error" not in st.session_state:
         st.session_state.history_error = None
 
+    if "documents_hydrated" not in st.session_state:
+        st.session_state.documents_hydrated = False
+
     query_session_id = read_query_session_id()
     if "session_id" not in st.session_state:
         st.session_state.session_id = query_session_id or str(uuid.uuid4())
@@ -85,6 +88,12 @@ def init_session_state():
         st.session_state.messages = []
         st.session_state.history_hydrated = False
         st.session_state.history_error = None
+        st.session_state.uploaded_documents = []
+        st.session_state.documents_hydrated = False
+        st.session_state.document_status_error = None
+        st.session_state.upload_feedback = None
+        if "uploader_key" in st.session_state:
+            st.session_state.uploader_key += 1
 
     if "uploaded_documents" not in st.session_state:
         st.session_state.uploaded_documents = []
@@ -393,6 +402,59 @@ def hydrate_chat_history_once():
         st.session_state.history_hydrated = True
 
 
+def hydrate_documents_once():
+    """Load this session's uploaded-document state exactly once per page load."""
+    if st.session_state.documents_hydrated:
+        return
+
+    try:
+        response = requests.get(
+            f"{CHAT_API_URL}/documents",
+            params={"session_id": st.session_state.session_id},
+            timeout=STATUS_REQUEST_TIMEOUT_SECONDS,
+        )
+        data = safe_json(response)
+        if response.ok:
+            hydrated_documents = []
+            for item in data.get("documents", []):
+                if not isinstance(item, dict):
+                    continue
+                object_name = str(item.get("object_name", "")).strip()
+                if not object_name:
+                    continue
+                hydrated_documents.append(
+                    {
+                        "object_name": object_name,
+                        "source_name": item.get("source_name") or os.path.basename(object_name),
+                        "status": item.get("status", "processing"),
+                        "ready": bool(item.get("ready", False)),
+                        "chunk_count": item.get("chunk_count", 0),
+                        "message": item.get(
+                            "message",
+                            "Upload complete. Waiting for ingestion to finish.",
+                        ),
+                        "checked_at": item.get("checked_at"),
+                    }
+                )
+
+            st.session_state.uploaded_documents = hydrated_documents
+            st.session_state.document_status_error = None
+        else:
+            detail = data.get("detail")
+            error = data.get("error", "Document restoration failed.")
+            st.session_state.document_status_error = (
+                f"{error} ({detail})" if detail else error
+            )
+    except requests.exceptions.ConnectionError:
+        st.session_state.document_status_error = (
+            "Cannot reach the Chat API documents endpoint right now."
+        )
+    except Exception as exc:
+        st.session_state.document_status_error = f"Document load error: {exc}"
+    finally:
+        st.session_state.documents_hydrated = True
+
+
 def merge_uploaded_documents(new_documents: list[dict]):
     """Prepend newly uploaded documents and keep object names unique."""
     if not new_documents:
@@ -461,6 +523,7 @@ def upload_selected_pdfs(uploaded_files) -> tuple[list[dict], list[str]]:
             }
             response = requests.post(
                 f"{CHAT_API_URL}/upload",
+                data={"session_id": st.session_state.session_id},
                 files=files,
                 timeout=UPLOAD_TIMEOUT_SECONDS,
             )
@@ -523,6 +586,7 @@ def poll_document_statuses(force: bool = False):
         response = requests.post(
             f"{CHAT_API_URL}/documents/status",
             json={
+                "session_id": st.session_state.session_id,
                 "documents": [
                     {
                         "object_name": doc.get("object_name"),
@@ -773,11 +837,15 @@ def render_sidebar():
                 pass
 
             st.session_state.messages = []
+            st.session_state.uploaded_documents = []
             st.session_state.session_id = str(uuid.uuid4())
             sync_query_session_id(st.session_state.session_id)
             st.session_state.history_hydrated = True
+            st.session_state.documents_hydrated = True
             st.session_state.history_error = None
+            st.session_state.document_status_error = None
             st.session_state.upload_feedback = None
+            st.session_state.uploader_key += 1
             st.rerun()
 
         st.caption(f"Session · `{st.session_state.session_id[:8]}`")
@@ -895,6 +963,7 @@ def handle_chat_input(chat_container=None):
 
 init_session_state()
 hydrate_chat_history_once()
+hydrate_documents_once()
 render_theme()
 render_sidebar()
 

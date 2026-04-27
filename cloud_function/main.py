@@ -30,6 +30,14 @@ storage_client: storage.Client | None = None
 # ---------------------------------------------------------------------------
 # MongoDB helpers
 # ---------------------------------------------------------------------------
+def extract_session_id_from_object_name(object_name: str) -> str:
+    """Extract the session folder immediately above the filename."""
+    path_parts = [part for part in (object_name or "").split("/") if part]
+    if len(path_parts) < 2:
+        return ""
+    return path_parts[-2]
+
+
 def get_mongo_client() -> MongoClient:
     """Return a shared MongoDB client for the function instance."""
     global mongo_client
@@ -106,7 +114,7 @@ def download_pdf_from_gcs(bucket_name: str, blob_name: str, dest_path: str):
     print(f"Downloaded gs://{bucket_name}/{blob_name} to {dest_path}")
 
 
-def extract_and_chunk(pdf_path: str, source_name: str):
+def extract_and_chunk(pdf_path: str, source_name: str, session_id: str):
     """Load PDF, split into chunks, and attach metadata."""
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -122,6 +130,8 @@ def extract_and_chunk(pdf_path: str, source_name: str):
 
     for chunk in chunks:
         chunk.metadata["source"] = source_name
+        if session_id:
+            chunk.metadata["session_id"] = session_id
 
     print(f"Extracted {len(pages)} pages into {len(chunks)} chunks")
     return chunks
@@ -157,6 +167,7 @@ def upsert_to_mongodb(chunks, embeddings):
     for chunk, embedding in zip(chunks, embeddings):
         chunk_metadata = chunk.metadata or {}
         source = chunk_metadata.get("source", "unknown")
+        session_id = chunk_metadata.get("session_id", "")
 
         # Store the raw 0-based page index from PyPDFLoader as-is.
         # The Chat API's _normalize_page_display() handles the +1 conversion
@@ -169,6 +180,7 @@ def upsert_to_mongodb(chunks, embeddings):
                 "vectorEmbedding": embedding,
                 "source": source,
                 "page": raw_page,
+                "session_id": session_id,
             }
         )
 
@@ -194,13 +206,14 @@ def process_pdf(cloud_event):
         return
 
     print(f"Processing: gs://{bucket_name}/{blob_name}")
+    session_id = extract_session_id_from_object_name(blob_name)
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
         download_pdf_from_gcs(bucket_name, blob_name, tmp_path)
-        chunks = extract_and_chunk(tmp_path, source_name=blob_name)
+        chunks = extract_and_chunk(tmp_path, source_name=blob_name, session_id=session_id)
 
         if not chunks:
             print("No text extracted from PDF - skipping.")

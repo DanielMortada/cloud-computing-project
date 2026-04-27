@@ -1,6 +1,6 @@
 # SmartStudy Architecture - High-Level Overview
 
-Last updated: 2026-04-02
+Last updated: 2026-04-27
 
 This is the quick, non-technical view of what the system does today.
 
@@ -23,7 +23,7 @@ flowchart LR
     S -->|7. Show ready or processing| B
 
     B -->|8. Ask question| X[Chat API]
-    X -->|9. Run vector search| D
+    X -->|9. Rank session chunks| D
     D -->|10. Return relevant chunks| X
     X -->|11. Generate grounded answer| E[Gemini Model]
     E -->|12. Return model output| X
@@ -46,7 +46,7 @@ flowchart LR
 ## Main User Journey
 
 1. Student selects one or more PDFs and uploads them in one batch from the UI.
-2. Each file is stored in the cloud bucket with a unique object name.
+2. Each file is stored in the cloud bucket under a session-scoped folder with a unique object name.
 3. An ingestion function automatically processes each PDF:
    - reads text
    - chunks text
@@ -54,8 +54,8 @@ flowchart LR
    - stores vectors in MongoDB
 4. UI polls document status and shows per-file readiness in the interface.
 5. Student asks a question in chat.
-6. Chat API retrieves context from MongoDB:
-   - normal questions use vector search
+6. Chat API retrieves context from MongoDB for the active session only:
+   - normal questions rank only that session's stored chunk vectors
    - `/quiz` samples a broader set of indexed chunks for grounded quiz generation
 7. Gemini generates an answer with citations.
 8. UI displays answer + sources.
@@ -64,9 +64,10 @@ flowchart LR
 
 - Cloud-native upload pipeline from UI to GCS.
 - Batch multi-PDF upload from one UI action.
+- Session-scoped upload paths in GCS (`uploads/<sid>/...`) to isolate study materials.
 - Automatic ingestion from GCS events.
 - Live per-document readiness notifications in UI via status polling.
-- Vector search on MongoDB Atlas.
+- Documents tab restored on refresh for the same session URL (`sid`).
 - Grounded Q&A with source citations.
 - Dedicated `/quiz` mode that builds quizzes from sampled indexed chunks instead of searching for the literal `/quiz` string.
 - Conversation memory restored on refresh for the same session URL (`sid`).
@@ -91,9 +92,10 @@ flowchart LR
 ## Current Limitations (Known)
 
 - Session continuity depends on keeping the same `sid` in the URL; opening a new session starts empty history.
+- Session continuity depends on keeping the same `sid` in the URL; opening a new session starts with empty chat and empty Documents state.
 - If multiple PDFs are active, citation lists may show multiple files by design.
 - The ingestion function still runs a bucket-to-Mongo reconciliation safety scan after uploads; acceptable for project scale, but not ideal for very large corpora.
-- User authentication and strict per-user document isolation are not enabled yet.
+- User authentication and strict user identity isolation are not enabled yet; current isolation is session-based.
 
 ## Next Evolution (When Needed)
 
