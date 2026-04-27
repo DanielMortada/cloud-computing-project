@@ -11,6 +11,7 @@ Deployed to Cloud Run (or run locally for development).
 """
 
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -20,6 +21,7 @@ from google.cloud import storage
 from werkzeug.utils import secure_filename
 
 from langchain_google_vertexai import ChatVertexAI, VertexAIEmbeddings
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_mongodb.chat_message_histories import MongoDBChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -41,6 +43,7 @@ GCP_REGION = os.environ.get("GCP_REGION", "europe-west1")
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "")
 GCS_UPLOAD_PREFIX = os.environ.get("GCS_UPLOAD_PREFIX", "uploads")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "25"))
+MIN_CONTEXT_SIMILARITY = float(os.environ.get("MIN_CONTEXT_SIMILARITY", "0.35"))
 PORT = int(os.environ.get("PORT", 8080))
 
 # ---------------------------------------------------------------------------
@@ -74,6 +77,23 @@ mongo_client: MongoClient | None = None
 storage_client: storage.Client | None = None
 embeddings_model: VertexAIEmbeddings | None = None
 rag_chain = None
+
+SOCIAL_PROMPTS = {
+    "hello",
+    "hi",
+    "hey",
+    "hey there",
+    "hello there",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "how are you",
+    "how are you doing",
+    "how are things",
+    "thanks",
+    "thank you",
+    "who are you",
+}
 
 
 def _normalize_page_display(raw_page):
@@ -129,6 +149,60 @@ def _display_source_name(source: str) -> str:
     """Return a user-facing filename for citations and status cards."""
     clean_source = (source or "").strip()
     return os.path.basename(clean_source) or clean_source or "unknown"
+
+
+def _normalize_prompt_for_match(question: str) -> str:
+    """Normalize a user prompt for simple intent classification."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", question.lower())).strip()
+
+
+def _is_social_prompt(question: str) -> bool:
+    """Return True for short social prompts that should not cite documents."""
+    normalized = _normalize_prompt_for_match(question)
+    if not normalized:
+        return False
+    if normalized in SOCIAL_PROMPTS:
+        return True
+    return any(
+        normalized.startswith(prefix)
+        for prefix in (
+            "hello ",
+            "hi ",
+            "hey ",
+            "how are you ",
+            "thank you ",
+            "thanks ",
+        )
+    )
+
+
+def _build_social_response(question: str) -> str:
+    """Return a polite, source-free reply for social prompts."""
+    normalized = _normalize_prompt_for_match(question)
+    if normalized.startswith("how are you"):
+        return (
+            "I'm doing well and I'm ready to help with your study materials. "
+            "Upload lecture notes or ask a question whenever you want."
+        )
+    if normalized in {"who are you"}:
+        return (
+            "I'm SmartStudy, your academic tutor. I can help explain uploaded notes, "
+            "summarize them, and generate study questions."
+        )
+    if normalized.startswith("thank"):
+        return "You're welcome. Ask about your notes whenever you're ready."
+    return "Hello. I'm ready to help with your study materials whenever you are."
+
+
+def _store_direct_response(session_id: str, question: str, answer: str):
+    """Persist a direct assistant reply outside the RAG chain."""
+    history = get_session_history(session_id)
+    history.add_messages(
+        [
+            HumanMessage(content=question),
+            AIMessage(content=answer),
+        ]
+    )
 
 
 def _extract_source_and_page(doc):
@@ -270,7 +344,14 @@ def _rank_session_records_by_similarity(
             continue
         scored_records.append((score, record))
 
+    if not scored_records:
+        return []
+
     scored_records.sort(key=lambda item: item[0], reverse=True)
+    best_score = scored_records[0][0]
+    if best_score < MIN_CONTEXT_SIMILARITY:
+        return []
+
     return [
         {key: value for key, value in record.items() if key != "vectorEmbedding"}
         for _, record in scored_records[:limit]
@@ -421,6 +502,13 @@ def _document_source_filter(object_name: str, session_id: str | None = None) -> 
     if session_id:
         filter_doc["session_id"] = session_id
     return filter_doc
+
+
+def delete_vectors_for_source(object_name: str, session_id: str | None = None) -> int:
+    """Delete all stored chunks for one uploaded document."""
+    collection = get_context_collection()
+    result = collection.delete_many(_document_source_filter(object_name, session_id=session_id))
+    return result.deleted_count
 
 
 def get_document_status(
@@ -578,6 +666,36 @@ def list_session_documents(session_id: str) -> list[dict]:
     return listed_documents
 
 
+def delete_session_document(object_name: str, session_id: str) -> dict:
+    """Delete one session-scoped PDF from storage and remove its indexed chunks."""
+    clean_object_name = (object_name or "").strip()
+    if not clean_object_name:
+        raise ValueError("Missing object_name.")
+
+    if extract_session_id_from_object_name(clean_object_name) != session_id:
+        raise ValueError("Document does not belong to the active session.")
+
+    bucket = get_storage_client().bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(clean_object_name)
+    existed_in_storage = False
+
+    try:
+        existed_in_storage = blob.exists()
+        if existed_in_storage:
+            blob.delete()
+    except Exception as exc:
+        raise RuntimeError(f"Storage delete failed: {exc}") from exc
+
+    deleted_vectors = delete_vectors_for_source(clean_object_name, session_id=session_id)
+    return {
+        "object_name": clean_object_name,
+        "source_name": _display_source_name(clean_object_name),
+        "session_id": session_id,
+        "deleted_from_storage": existed_in_storage,
+        "deleted_vectors": deleted_vectors,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -605,8 +723,23 @@ def chat():
         return jsonify({"error": "No question provided"}), 400
 
     try:
+        if _is_social_prompt(question):
+            answer = _build_social_response(question)
+            _store_direct_response(session_id, question, answer)
+            return jsonify({"answer": answer, "sources": []})
+
         # 1. Retrieve relevant context using a dedicated path for quiz mode.
         context_text, sources = retrieve_context_for_question(question, session_id)
+        if not context_text:
+            if _is_quiz_command(question):
+                answer = (
+                    "I don't have enough indexed material in the uploaded notes "
+                    "to generate a quiz yet."
+                )
+            else:
+                answer = "I don't have enough information in the uploaded notes to answer this."
+            _store_direct_response(session_id, question, answer)
+            return jsonify({"answer": answer, "sources": []})
 
         # 2. Run the RAG chain with conversation history
         chain = build_rag_chain()
@@ -710,6 +843,29 @@ def list_documents():
         return jsonify({"error": "Internal server error", "detail": str(exc)}), 500
 
 
+@app.route("/documents", methods=["DELETE"])
+def delete_document():
+    """DELETE /documents?session_id=...&object_name=... - Remove one uploaded PDF."""
+    session_id = normalize_session_id(request.args.get("session_id", ""))
+    object_name = (request.args.get("object_name", "") or "").strip()
+
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+    if not object_name:
+        return jsonify({"error": "Missing object_name"}), 400
+
+    try:
+        result = delete_session_document(object_name, session_id)
+        return jsonify({"status": "deleted", **result})
+    except ValueError as exc:
+        return jsonify({"error": "Invalid delete request", "detail": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": "Delete failed", "detail": str(exc)}), 500
+    except Exception as exc:
+        print(f"❌ Error in DELETE /documents: {exc}")
+        return jsonify({"error": "Internal server error", "detail": str(exc)}), 500
+
+
 @app.route("/documents/status", methods=["POST"])
 def document_status():
     """
@@ -750,7 +906,7 @@ def document_status():
 @app.route("/history", methods=["DELETE"])
 def clear_history():
     """DELETE /history?session_id=... - Clear chat history for a session."""
-    session_id = request.args.get("session_id", "default")
+    session_id = normalize_session_id(request.args.get("session_id", "")) or "default"
     history = get_session_history(session_id)
     history.clear()
     return jsonify({"status": "cleared", "session_id": session_id})
@@ -759,7 +915,7 @@ def clear_history():
 @app.route("/history", methods=["GET"])
 def read_history():
     """GET /history?session_id=... - Return stored chat messages for a session."""
-    session_id = request.args.get("session_id", "").strip()
+    session_id = normalize_session_id(request.args.get("session_id", ""))
     if not session_id:
         return jsonify({"error": "Missing session_id"}), 400
 

@@ -2,7 +2,7 @@
 
 > INFO-H505 Cloud Computing Project - ULB 2025-2026
 
-SmartStudy is a cloud-native study assistant for lecture PDFs. A student batch-uploads PDFs in the Streamlit UI, the Chat API stores them in a session-scoped folder in Google Cloud Storage through `POST /upload`, GCS events trigger ingestion and cleanup functions, and the chat backend answers questions with grounded citations from MongoDB Atlas.
+SmartStudy is a cloud-native study assistant for lecture PDFs. A student batch-uploads PDFs in the Streamlit UI, the Chat API stores them in a session-scoped folder in Google Cloud Storage through `POST /upload`, GCS events trigger ingestion and cleanup functions, the UI can delete session documents through `DELETE /documents`, and the chat backend answers questions with grounded citations from MongoDB Atlas.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ High-level flow:
 6. The user asks a question in the UI.
 7. The UI calls the Chat API chat endpoint.
 8. The API loads only the active session's chunks, ranks them by embedding similarity, builds the prompt, and returns a grounded answer with citations.
-9. If a PDF is deleted from GCS, the cleanup function removes its vectors from MongoDB.
+9. If a PDF is deleted from the Documents UI or directly from GCS, the file is removed from storage and its vectors are removed from MongoDB.
 
 For diagrams and deeper implementation notes, see:
 
@@ -164,10 +164,11 @@ gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --proj
 1. Upload a PDF through the Streamlit UI, or call the upload endpoint indirectly by using the UI.
 2. Confirm the file appears in GCS.
 3. Watch the ingest function logs.
-4. Ask a question in the UI and verify the answer includes sources.
-5. Refresh the UI and confirm the same `sid` URL keeps both the same chat history and the same Documents list.
-6. Click `New Session` and confirm both chat and Documents start empty for the new `sid`.
-7. Delete a PDF from GCS and confirm the cleanup function removes its vectors.
+4. Ask a document-grounded question in the UI and verify the answer includes sources.
+5. Ask `Hello` or `How are you?` and verify the answer returns without document sources.
+6. Refresh the UI, or reopen the same `?sid=...` link, and confirm the same chat history and Documents list are restored.
+7. Click `New Session` and confirm both chat and Documents start empty for the new `sid`.
+8. Delete a PDF from the Documents tab and confirm the file disappears from the session and no longer contributes context.
 
 Useful commands:
 
@@ -213,8 +214,10 @@ Create a vector search index named `vector_index` on the `context` collection. T
 - Each upload is namespaced under `uploads/<session_id>/...`, which isolates one session's study materials from another.
 - Ingestion is event-driven and reproducible: a finalized object in GCS is what starts PDF processing.
 - Cleanup is also event-driven: deleting a PDF from GCS removes its stored vectors.
-- Chat memory is persisted in MongoDB and restored on refresh using session-aware history hydration (`sid` + `GET /history`).
-- The Documents tab is also restored on refresh through session-aware document hydration (`sid` + `GET /documents`).
+- The UI can remove one session-scoped PDF at a time through the Documents tab, which calls `DELETE /documents`.
+- Chat memory is persisted in MongoDB and restored on refresh or reopen using session-aware history hydration (`sid` + `GET /history`).
+- The Documents tab and sidebar status badges are restored and re-synced through session-aware document hydration (`sid` + `GET /documents`).
+- Short social prompts such as `Hello` and `How are you?` return source-free replies instead of citing uploaded PDFs.
 - Opening the app with a new or missing `sid` starts a new session by design, with an empty chat and an empty Documents pane.
 
 ## Team

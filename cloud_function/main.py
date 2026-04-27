@@ -114,6 +114,12 @@ def download_pdf_from_gcs(bucket_name: str, blob_name: str, dest_path: str):
     print(f"Downloaded gs://{bucket_name}/{blob_name} to {dest_path}")
 
 
+def object_exists_in_bucket(bucket_name: str, blob_name: str) -> bool:
+    """Return True when the referenced object still exists in GCS."""
+    bucket = get_storage_client().bucket(bucket_name)
+    return bucket.blob(blob_name).exists()
+
+
 def extract_and_chunk(pdf_path: str, source_name: str, session_id: str):
     """Load PDF, split into chunks, and attach metadata."""
     from langchain_community.document_loaders import PyPDFLoader
@@ -212,6 +218,10 @@ def process_pdf(cloud_event):
         tmp_path = tmp.name
 
     try:
+        if not object_exists_in_bucket(bucket_name, blob_name):
+            print(f"Skipping {blob_name}: object no longer exists in storage.")
+            return
+
         download_pdf_from_gcs(bucket_name, blob_name, tmp_path)
         chunks = extract_and_chunk(tmp_path, source_name=blob_name, session_id=session_id)
 
@@ -225,6 +235,10 @@ def process_pdf(cloud_event):
         deleted_for_source = delete_vectors_for_source(blob_name)
         if deleted_for_source:
             print(f"Removed {deleted_for_source} old vectors for {blob_name}")
+
+        if not object_exists_in_bucket(bucket_name, blob_name):
+            print(f"Skipping upsert for {blob_name}: object was deleted during ingestion.")
+            return
 
         upsert_to_mongodb(chunks, embeddings)
 

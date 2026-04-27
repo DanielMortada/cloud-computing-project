@@ -66,11 +66,13 @@ flowchart LR
 - Batch multi-PDF upload from one UI action.
 - Session-scoped upload paths in GCS (`uploads/<sid>/...`) to isolate study materials.
 - Automatic ingestion from GCS events.
-- Live per-document readiness notifications in UI via status polling.
+- Live per-document readiness notifications in UI via session document polling.
 - Documents tab restored on refresh for the same session URL (`sid`).
+- Documents can be removed from the current session directly from the Documents tab.
 - Grounded Q&A with source citations.
+- Short social prompts and no-context questions return without document citations.
 - Dedicated `/quiz` mode that builds quizzes from sampled indexed chunks instead of searching for the literal `/quiz` string.
-- Conversation memory restored on refresh for the same session URL (`sid`).
+- Conversation memory restored on refresh or reopen for the same session URL (`sid`).
 - Automatic cleanup of vectors when PDFs are deleted from GCS.
 
 ## Why This Architecture Is Good for the Project
@@ -86,18 +88,17 @@ flowchart LR
 
 ## Current Deployed Endpoints
 
-- UI: `https://smartstudy-ui-omcgx7zncq-ew.a.run.app`
-- Chat API: `https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app`
+- UI: `https://smartstudy-ui-959221029360.europe-west1.run.app`
+- Chat API: `https://smartstudy-chat-api-959221029360.europe-west1.run.app`
 
 ## Current Limitations (Known)
 
-- Session continuity depends on keeping the same `sid` in the URL; opening a new session starts empty history.
-- Session continuity depends on keeping the same `sid` in the URL; opening a new session starts with empty chat and empty Documents state.
+- Session continuity depends on keeping the same `sid` in the URL; opening a new or different session starts with empty chat and empty Documents state.
 - If multiple PDFs are active, citation lists may show multiple files by design.
 - The ingestion function still runs a bucket-to-Mongo reconciliation safety scan after uploads; acceptable for project scale, but not ideal for very large corpora.
 - User authentication and strict user identity isolation are not enabled yet; current isolation is session-based.
 
 ## Next Evolution (When Needed)
 
-- Better document management UI (list/delete/select active docs).
+- Better multi-document controls (for example select active docs without deleting them).
 - Authenticated user identity mapped to session/document scope.

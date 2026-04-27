@@ -14,8 +14,8 @@ This document is the technical reference for the current production setup and da
 | GCS Bucket | `gs://smartstudy-pdfs-491919` | `EUROPE-WEST1` | `uniform_bucket_level_access=True`, `public_access_prevention=inherited` |
 | Cloud Function (ingest) | `smartstudy-ingest` | `europe-west1` | Gen2, trigger=`google.cloud.storage.object.v1.finalized`, memory=`1Gi`, timeout=`300s` |
 | Cloud Function (cleanup) | `smartstudy-cleanup` | `europe-west1` | Gen2, trigger=`google.cloud.storage.object.v1.deleted`, memory=`1Gi`, timeout=`300s` |
-| Cloud Run (Chat API) | `smartstudy-chat-api` | `europe-west1` | URL: `https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app` |
-| Cloud Run (UI) | `smartstudy-ui` | `europe-west1` | URL: `https://smartstudy-ui-omcgx7zncq-ew.a.run.app` |
+| Cloud Run (Chat API) | `smartstudy-chat-api` | `europe-west1` | URL: `https://smartstudy-chat-api-959221029360.europe-west1.run.app` |
+| Cloud Run (UI) | `smartstudy-ui` | `europe-west1` | URL: `https://smartstudy-ui-959221029360.europe-west1.run.app` |
 | MongoDB Atlas DB | `smartstudy` | Atlas | Collections: `context`, `chat_history` |
 | MongoDB Vector Index | `vector_index` | Atlas | Collection=`context`, field=`vectorEmbedding`, dim=`768`, similarity=`cosine` |
 
@@ -63,10 +63,10 @@ flowchart TD
     UI -->|B1. Restore docs on refresh| DOCS[/GET /documents/]
     DOCS -->|B2. List this session's uploads| GCS
     GCS -->|B3. Return session document list| DOCS
-    UI -->|B4. Poll readiness| STAT[/POST /documents/status/]
-    STAT -->|B5. Count indexed chunks| CTX
-    CTX -->|B6. Return status summary| STAT
-    STAT -->|B7. Update status cards| UI
+    UI -->|B4. Poll current session docs| DOCS
+    DOCS -->|B5. Count indexed chunks| CTX
+    CTX -->|B6. Return status summary| DOCS
+    DOCS -->|B7. Update cards + sidebar state| UI
 
     UI -->|8. Ask question| CHAT[/POST /chat/]
     CHAT -->|9. Receive chat request| API
@@ -106,37 +106,48 @@ flowchart TD
 6. GCS emits `object.finalized` events.
 7. `smartstudy-ingest` executes ingestion per uploaded object.
 
-### B) Document rehydration + readiness path (`GET /documents` + `POST /documents/status`)
+### B) Document rehydration + readiness path (`GET /documents`)
 
 1. Streamlit mirrors the active `session_id` to `?sid=...`.
 2. On page load, the UI calls `GET /documents?session_id=<sid>` once to rebuild the Documents tab from the session-scoped GCS folder.
 3. The Chat API lists objects only from `uploads/<session_id>/...` and returns their current status summary.
 4. Streamlit stores those `object_name` values in session state.
-5. While any file is pending, UI polls `POST /documents/status` at `STATUS_POLL_INTERVAL_SECONDS`.
+5. While any file is pending, UI polls `GET /documents?session_id=<sid>` at `STATUS_POLL_INTERVAL_SECONDS`.
 6. Chat API checks readiness per object by:
    - counting matching chunks in Mongo `context`
    - optionally checking object existence in GCS
 7. Chat API returns per-document status (`ready`, `processing`, `not_found`, `invalid`) plus summary counts.
-8. UI updates each document card in real time until ingestion is complete.
+8. UI compares a stable document-state signature and only triggers a full rerun when a meaningful status change happened, which keeps the sidebar badges and chat welcome state in sync.
 
-### C) Ingestion path (`smartstudy-ingest`)
+### C) Document delete path (`DELETE /documents`)
+
+1. User clicks `Delete` on a document card in the Documents tab.
+2. Streamlit calls `DELETE /documents?session_id=<sid>&object_name=<gcs_path>`.
+3. Chat API validates that the object belongs to the active session.
+4. Chat API deletes the object from the session-scoped GCS folder.
+5. Chat API immediately deletes indexed chunks where both `source` and `session_id` match the removed object.
+6. UI refreshes `GET /documents` and removes the card from the current session view.
+
+### D) Ingestion path (`smartstudy-ingest`)
 
 Pipeline in `cloud_function/main.py -> process_pdf`:
 
-1. Download PDF from GCS to `/tmp`.
-2. Parse pages with `PyPDFLoader`.
-3. Chunk text with `RecursiveCharacterTextSplitter`:
+1. Confirm the object still exists in GCS before starting work.
+2. Download PDF from GCS to `/tmp`.
+3. Parse pages with `PyPDFLoader`.
+4. Chunk text with `RecursiveCharacterTextSplitter`:
    - `chunk_size=1000`
    - `chunk_overlap=200`
-4. Generate embeddings in batches of 250 using Vertex AI.
-5. Enforce idempotency per object path:
+5. Generate embeddings in batches of 250 using Vertex AI.
+6. Enforce idempotency per object path:
    - `delete_vectors_for_source(blob_name)` before insert.
-6. Insert chunk docs into Mongo `context`, including the extracted `session_id`.
-7. Reuse shared module-level MongoDB and GCS clients inside the warm function instance to avoid rebuilding clients on every helper call.
-8. Reconcile stale vectors against current bucket content:
+7. Confirm the object still exists in GCS again just before upsert, so a mid-ingestion delete does not recreate vectors for a removed document.
+8. Insert chunk docs into Mongo `context`, including the extracted `session_id`.
+9. Reuse shared module-level MongoDB and GCS clients inside the warm function instance to avoid rebuilding clients on every helper call.
+10. Reconcile stale vectors against current bucket content:
    - remove docs whose `source` no longer exists in GCS.
 
-### D) Delete-sync path (`smartstudy-cleanup`)
+### E) Delete-sync path (`smartstudy-cleanup`)
 
 Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 
@@ -147,32 +158,35 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 4. If truly deleted:
    - `delete_many` vectors where `source` matches blob path.
 
-### E) Chat path (`POST /chat`)
+### F) Chat path (`POST /chat`)
 
 1. Read user question and `session_id`.
-2. Choose retrieval strategy:
+2. Check for short social prompts such as `Hello`, `How are you?`, or `Thank you`; these bypass retrieval and return direct source-free replies.
+3. Otherwise choose retrieval strategy:
    - normal questions: load this session's indexed chunks and rank them by cosine similarity against the current query embedding
    - `/quiz`: randomly sample 10 indexed chunk records from Mongo `context` for this same session only
-3. Normalize source/page metadata for citations.
-4. Compose prompt:
+4. If the best similarity score is below the minimum context threshold, or no session chunks exist, return a direct no-context answer with no sources.
+5. Normalize source/page metadata for citations.
+6. Compose prompt:
    - system tutor persona
    - conversation history (`MongoDBChatMessageHistory`)
    - retrieved context
-5. Generate answer with Gemini 2.5 Flash using `max_output_tokens=8192`.
-6. Return:
+7. Generate answer with Gemini 2.5 Flash using `max_output_tokens=8192`.
+8. Return:
    - `answer`
    - deduplicated `sources` list
 
-### F) Session rehydration (`GET /history` + `GET /documents` + UI `sid`)
+### G) Session rehydration (`GET /history` + `GET /documents` + UI `sid`)
 
 1. Streamlit keeps a stable `session_id` and mirrors it to `?sid=...`.
 2. On page load, UI calls `GET /history?session_id=<sid>` once.
 3. On that same page load, UI also calls `GET /documents?session_id=<sid>` once.
 4. Chat API reads `MongoDBChatMessageHistory` from `chat_history`.
 5. Chat API lists GCS objects only from the active session folder.
-6. UI rehydrates both the conversation and the Documents tab before rendering them.
-7. If URL `sid` changes or is absent, UI intentionally starts a new session with empty chat and empty document state.
-8. Temporary transport errors in the UI are not persisted as assistant messages.
+6. If either restore request fails, the UI leaves the corresponding hydration flag unset so the next rerun can retry instead of treating the failed load as complete.
+7. UI rehydrates both the conversation and the Documents tab before rendering them, which restores the same state on refresh or when reopening the same `?sid=...` link.
+8. If URL `sid` changes or is absent, UI intentionally starts a new session with empty chat and empty document state.
+9. Temporary transport errors in the UI are not persisted as assistant messages.
 
 ## 4) Data Model (Current)
 
@@ -213,13 +227,13 @@ gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --proj
 ### List session documents via API
 
 ```bash
-curl "https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app/documents?session_id=YOUR_SESSION_ID"
+curl "https://smartstudy-chat-api-959221029360.europe-west1.run.app/documents?session_id=YOUR_SESSION_ID"
 ```
 
 ### Check document readiness via API
 
 ```bash
-curl -X POST "https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app/documents/status" \
+curl -X POST "https://smartstudy-chat-api-959221029360.europe-west1.run.app/documents/status" \
   -H "Content-Type: application/json" \
   -d '{
     "session_id": "YOUR_SESSION_ID",
@@ -227,6 +241,12 @@ curl -X POST "https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app/documents/stat
       { "object_name": "uploads/YOUR_SESSION_ID/example-a1b2c3d4.pdf" }
     ]
   }'
+```
+
+### Delete one session document via API
+
+```bash
+curl -X DELETE "https://smartstudy-chat-api-959221029360.europe-west1.run.app/documents?session_id=YOUR_SESSION_ID&object_name=uploads/YOUR_SESSION_ID/example-a1b2c3d4.pdf"
 ```
 
 ### Trigger ingestion manually
@@ -278,7 +298,7 @@ gcloud functions deploy smartstudy-cleanup \
 - Session continuity is URL-session based (`sid`) rather than account-based identity.
 - Anyone with the same `sid` can view the same chat history and session document namespace; authentication is not enforced yet.
 - Source list may include multiple active files if user uploads several PDFs; expected behavior.
-- Readiness polling is inferred from indexed chunk presence and storage checks, so status is near-real-time but event-driven.
+- Readiness and sidebar sync are inferred from indexed chunk presence and storage checks, so status is near-real-time but event-driven.
 - `reconcile_context_with_bucket()` still performs a full bucket + collection consistency scan after each upload as a safety net; useful for resilience at demo scale, but not the most scalable long-term design.
 - Optional future hardening:
   - add authenticated document ownership instead of URL-session isolation alone

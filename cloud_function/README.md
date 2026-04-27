@@ -56,7 +56,7 @@ SmartStudy deploys **two** Cloud Functions, both triggered by events from the sa
 | Function | Trigger Event | Purpose |
 |---|---|---|
 | `smartstudy-ingest` | `object.v1.finalized` (file created/overwritten) | Ingest the PDF → chunks → embeddings → MongoDB |
-| `smartstudy-cleanup` | `object.v1.deleted` (file removed) | Remove all related vectors from MongoDB |
+| `smartstudy-cleanup` | `object.v1.deleted` (file removed) | Remove all related vectors from MongoDB after a UI delete or direct GCS delete |
 
 Together, they ensure that MongoDB's vector knowledge base is **always in sync** with whatever PDFs exist in the bucket — without any manual intervention.
 
@@ -115,7 +115,17 @@ if not blob_name.lower().endswith(".pdf"):
     return
 ```
 
-**3. Download to local disk**
+**3. Confirm the object still exists before download**
+
+The function now checks GCS before doing any heavy work. If the PDF was already removed after the finalize event was emitted, ingestion exits early instead of doing wasted work:
+
+```python
+if not object_exists_in_bucket(bucket_name, blob_name):
+    print(f"Skipping {blob_name}: object no longer exists in storage.")
+    return
+```
+
+**4. Download to local disk**
 
 Cloud Functions have a writable `/tmp` directory. We download the PDF there so LangChain's `PyPDFLoader` can read it:
 
@@ -123,7 +133,7 @@ Cloud Functions have a writable `/tmp` directory. We download the PDF there so L
 download_pdf_from_gcs(bucket_name, blob_name, tmp_path)
 ```
 
-**4. Extract text and chunk it**
+**5. Extract text and chunk it**
 
 We use LangChain's `PyPDFLoader` to read the PDF page by page, then `RecursiveCharacterTextSplitter` to break the text into overlapping chunks of ~1000 characters. The overlap ensures that sentences split across chunk boundaries still appear in at least one chunk:
 
@@ -132,7 +142,7 @@ session_id = extract_session_id_from_object_name(blob_name)
 chunks = extract_and_chunk(tmp_path, source_name=blob_name, session_id=session_id)
 ```
 
-**5. Generate embeddings**
+**6. Generate embeddings**
 
 Each text chunk is sent to **Vertex AI's `text-embedding-005`** model, which returns a 768-dimensional vector — a numerical fingerprint of the chunk's semantic meaning. We batch these in groups of 250 to respect API limits:
 
@@ -140,16 +150,21 @@ Each text chunk is sent to **Vertex AI's `text-embedding-005`** model, which ret
 embeddings = generate_embeddings(chunks)
 ```
 
-**6. Idempotent upsert**
+**7. Idempotent upsert**
 
-Before inserting, we delete any existing vectors for this exact source path. This makes the function **idempotent** — if the same PDF is uploaded twice (overwrite), we don't end up with duplicate chunks:
+Before inserting, we delete any existing vectors for this exact source path. This makes the function **idempotent** - if the same PDF is uploaded twice (overwrite), we don't end up with duplicate chunks:
 
 ```python
 deleted_for_source = delete_vectors_for_source(blob_name)
+if not object_exists_in_bucket(bucket_name, blob_name):
+    print(f"Skipping upsert for {blob_name}: object was deleted during ingestion.")
+    return
 upsert_to_mongodb(chunks, embeddings)
 ```
 
-**7. Reconciliation safety net**
+That second existence check matters for the new UI delete flow: if a user removes a PDF while ingestion is already running, the function will not recreate vectors for a document that has already been deleted from the session.
+
+**8. Reconciliation safety net**
 
 As a final step, we scan the entire MongoDB collection and compare it against what's currently in the bucket. Any vectors whose source file no longer exists are removed. This catches edge cases where a delete event was missed:
 

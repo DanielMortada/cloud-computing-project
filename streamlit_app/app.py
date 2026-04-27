@@ -79,6 +79,9 @@ def init_session_state():
     if "documents_hydrated" not in st.session_state:
         st.session_state.documents_hydrated = False
 
+    if "document_feedback" not in st.session_state:
+        st.session_state.document_feedback = None
+
     query_session_id = read_query_session_id()
     if "session_id" not in st.session_state:
         st.session_state.session_id = query_session_id or str(uuid.uuid4())
@@ -91,6 +94,7 @@ def init_session_state():
         st.session_state.uploaded_documents = []
         st.session_state.documents_hydrated = False
         st.session_state.document_status_error = None
+        st.session_state.document_feedback = None
         st.session_state.upload_feedback = None
         if "uploader_key" in st.session_state:
             st.session_state.uploader_key += 1
@@ -362,6 +366,86 @@ def safe_json(response: requests.Response) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def normalize_document_payload(item: dict) -> dict | None:
+    """Normalize one API document record for Streamlit state."""
+    if not isinstance(item, dict):
+        return None
+
+    object_name = str(item.get("object_name", "")).strip()
+    if not object_name:
+        return None
+
+    return {
+        "object_name": object_name,
+        "source_name": item.get("source_name") or os.path.basename(object_name),
+        "status": item.get("status", "processing"),
+        "ready": bool(item.get("ready", False)),
+        "chunk_count": item.get("chunk_count", 0),
+        "message": item.get(
+            "message",
+            "Upload complete. Waiting for ingestion to finish.",
+        ),
+        "checked_at": item.get("checked_at"),
+    }
+
+
+def document_state_signature(documents: list[dict]) -> tuple:
+    """Return a stable signature used to detect meaningful document-state changes."""
+    normalized_documents = []
+    for document in documents:
+        object_name = str(document.get("object_name", "")).strip()
+        if not object_name:
+            continue
+        normalized_documents.append(
+            (
+                object_name,
+                str(document.get("status", "")),
+                bool(document.get("ready", False)),
+                int(document.get("chunk_count", 0) or 0),
+            )
+        )
+    return tuple(sorted(normalized_documents))
+
+
+def refresh_session_documents() -> bool:
+    """Refresh the session document list from the backend."""
+    previous_signature = document_state_signature(st.session_state.uploaded_documents)
+
+    try:
+        response = requests.get(
+            f"{CHAT_API_URL}/documents",
+            params={"session_id": st.session_state.session_id},
+            timeout=STATUS_REQUEST_TIMEOUT_SECONDS,
+        )
+        data = safe_json(response)
+        if response.ok:
+            refreshed_documents = []
+            for item in data.get("documents", []):
+                normalized_document = normalize_document_payload(item)
+                if normalized_document is not None:
+                    refreshed_documents.append(normalized_document)
+
+            st.session_state.uploaded_documents = refreshed_documents
+            st.session_state.documents_hydrated = True
+            st.session_state.document_status_error = None
+            return document_state_signature(refreshed_documents) != previous_signature
+
+        detail = data.get("detail")
+        error = data.get("error", "Document restoration failed.")
+        st.session_state.document_status_error = f"{error} ({detail})" if detail else error
+        st.session_state.documents_hydrated = False
+    except requests.exceptions.ConnectionError:
+        st.session_state.document_status_error = (
+            "Cannot reach the Chat API documents endpoint right now."
+        )
+        st.session_state.documents_hydrated = False
+    except Exception as exc:
+        st.session_state.document_status_error = f"Document load error: {exc}"
+        st.session_state.documents_hydrated = False
+
+    return False
+
+
 def hydrate_chat_history_once():
     """Load persisted chat history for this session exactly once per page load."""
     if st.session_state.history_hydrated:
@@ -385,6 +469,7 @@ def hydrate_chat_history_once():
                 role = normalize_chat_role(str(item.get("role", "")))
                 hydrated_messages.append({"role": role, "content": content})
             st.session_state.messages = hydrated_messages
+            st.session_state.history_hydrated = True
             st.session_state.history_error = None
         else:
             detail = data.get("detail")
@@ -392,67 +477,28 @@ def hydrate_chat_history_once():
             st.session_state.history_error = (
                 f"{error} ({detail})" if detail else error
             )
+            st.session_state.history_hydrated = False
     except requests.exceptions.ConnectionError:
         st.session_state.history_error = (
             "Cannot reach the Chat API history endpoint right now."
         )
+        st.session_state.history_hydrated = False
     except Exception as exc:
         st.session_state.history_error = f"History load error: {exc}"
-    finally:
-        st.session_state.history_hydrated = True
+        st.session_state.history_hydrated = False
 
 
 def hydrate_documents_once():
     """Load this session's uploaded-document state exactly once per page load."""
     if st.session_state.documents_hydrated:
         return
+    refresh_session_documents()
 
-    try:
-        response = requests.get(
-            f"{CHAT_API_URL}/documents",
-            params={"session_id": st.session_state.session_id},
-            timeout=STATUS_REQUEST_TIMEOUT_SECONDS,
-        )
-        data = safe_json(response)
-        if response.ok:
-            hydrated_documents = []
-            for item in data.get("documents", []):
-                if not isinstance(item, dict):
-                    continue
-                object_name = str(item.get("object_name", "")).strip()
-                if not object_name:
-                    continue
-                hydrated_documents.append(
-                    {
-                        "object_name": object_name,
-                        "source_name": item.get("source_name") or os.path.basename(object_name),
-                        "status": item.get("status", "processing"),
-                        "ready": bool(item.get("ready", False)),
-                        "chunk_count": item.get("chunk_count", 0),
-                        "message": item.get(
-                            "message",
-                            "Upload complete. Waiting for ingestion to finish.",
-                        ),
-                        "checked_at": item.get("checked_at"),
-                    }
-                )
 
-            st.session_state.uploaded_documents = hydrated_documents
-            st.session_state.document_status_error = None
-        else:
-            detail = data.get("detail")
-            error = data.get("error", "Document restoration failed.")
-            st.session_state.document_status_error = (
-                f"{error} ({detail})" if detail else error
-            )
-    except requests.exceptions.ConnectionError:
-        st.session_state.document_status_error = (
-            "Cannot reach the Chat API documents endpoint right now."
-        )
-    except Exception as exc:
-        st.session_state.document_status_error = f"Document load error: {exc}"
-    finally:
-        st.session_state.documents_hydrated = True
+def sync_document_state_before_render():
+    """Refresh pending-document state before rendering dependent UI blocks."""
+    if has_pending_documents():
+        refresh_session_documents()
 
 
 def merge_uploaded_documents(new_documents: list[dict]):
@@ -570,63 +616,56 @@ def upload_selected_pdfs(uploaded_files) -> tuple[list[dict], list[str]]:
 
 def poll_document_statuses(force: bool = False):
     """Refresh document readiness from the Chat API."""
-    all_documents = st.session_state.uploaded_documents
-    if not all_documents:
-        return
+    if not st.session_state.uploaded_documents and not force:
+        return False
+    return refresh_session_documents()
 
-    target_documents = (
-        all_documents
-        if force
-        else [doc for doc in all_documents if doc.get("status") == "processing"]
-    )
-    if not target_documents:
-        return
+
+def delete_document_from_session(document: dict) -> bool:
+    """Delete one uploaded PDF from the active session."""
+    object_name = str(document.get("object_name", "")).strip()
+    if not object_name:
+        st.session_state.document_status_error = "Cannot delete a document without object_name."
+        return False
 
     try:
-        response = requests.post(
-            f"{CHAT_API_URL}/documents/status",
-            json={
+        response = requests.delete(
+            f"{CHAT_API_URL}/documents",
+            params={
                 "session_id": st.session_state.session_id,
-                "documents": [
-                    {
-                        "object_name": doc.get("object_name"),
-                        "source_name": doc.get("source_name"),
-                    }
-                    for doc in target_documents
-                ]
+                "object_name": object_name,
             },
             timeout=STATUS_REQUEST_TIMEOUT_SECONDS,
         )
         data = safe_json(response)
         if not response.ok:
             detail = data.get("detail")
-            error = data.get("error", "Status polling failed.")
+            error = data.get("error", "Delete failed.")
             st.session_state.document_status_error = (
                 f"{error} ({detail})" if detail else error
             )
-            return
+            return False
 
-        status_by_object_name = {
-            item.get("object_name"): item
-            for item in data.get("documents", [])
-            if item.get("object_name")
-        }
-
-        refreshed_documents = []
-        for document in all_documents:
-            object_name = document.get("object_name")
-            refreshed_documents.append(
-                {**document, **status_by_object_name.get(object_name, {})}
-            )
-
-        st.session_state.uploaded_documents = refreshed_documents
+        st.session_state.uploaded_documents = [
+            existing_document
+            for existing_document in st.session_state.uploaded_documents
+            if existing_document.get("object_name") != object_name
+        ]
         st.session_state.document_status_error = None
+        st.session_state.document_feedback = {
+            "kind": "success",
+            "message": f"Removed {document.get('source_name', 'the document')} from this session.",
+        }
+        refresh_session_documents()
+        return True
     except requests.exceptions.ConnectionError:
         st.session_state.document_status_error = (
-            "Cannot reach the Chat API status endpoint right now."
+            "Cannot reach the Chat API delete endpoint right now."
         )
     except Exception as exc:
-        st.session_state.document_status_error = f"Status polling error: {exc}"
+        st.session_state.document_status_error = f"Delete error: {exc}"
+
+    return False
 
 
 def build_document_card(document: dict) -> str:
@@ -697,21 +736,35 @@ def render_document_status_panel():
     with col_b:
         if st.button("Refresh", key="refresh_document_statuses", use_container_width=True):
             poll_document_statuses(force=True)
+            st.rerun()
 
     if st.session_state.document_status_error:
         st.warning(st.session_state.document_status_error)
 
-    cards = "".join(build_document_card(document) for document in documents)
-    st.markdown(
-        dedent(
-            f"""
-        <section class="ss-section-shell">
-            <div class="ss-doc-grid">{cards}</div>
-        </section>
-            """
-        ).strip(),
-        unsafe_allow_html=True,
-    )
+    feedback = st.session_state.document_feedback
+    if feedback:
+        if feedback["kind"] == "success":
+            st.success(feedback["message"])
+        elif feedback["kind"] == "warning":
+            st.warning(feedback["message"])
+        else:
+            st.error(feedback["message"])
+
+    st.markdown('<section class="ss-section-shell">', unsafe_allow_html=True)
+    for start_index in range(0, len(documents), 3):
+        columns = st.columns(3)
+        for column_index, document in enumerate(documents[start_index:start_index + 3]):
+            with columns[column_index]:
+                st.markdown(build_document_card(document), unsafe_allow_html=True)
+                if st.button(
+                    "Delete",
+                    key=f"delete_document_{document.get('object_name', start_index + column_index)}",
+                    use_container_width=True,
+                ):
+                    deleted = delete_document_from_session(document)
+                    if deleted:
+                        st.rerun()
+    st.markdown("</section>", unsafe_allow_html=True)
 
 
 def render_document_status_area():
@@ -721,14 +774,18 @@ def render_document_status_area():
 
     if fragment is None or not pending_documents:
         if pending_documents:
-            poll_document_statuses()
+            status_changed = poll_document_statuses()
+            if status_changed:
+                st.rerun()
         render_document_status_panel()
         return
 
     @fragment(run_every=STATUS_POLL_INTERVAL_SECONDS)
     def document_status_fragment():
         if has_pending_documents():
-            poll_document_statuses()
+            status_changed = poll_document_statuses()
+            if status_changed:
+                st.rerun()
         render_document_status_panel()
 
     document_status_fragment()
@@ -787,6 +844,7 @@ def render_sidebar():
 
                 if successful_uploads:
                     merge_uploaded_documents(successful_uploads)
+                    st.session_state.document_feedback = None
                     st.session_state.uploader_key += 1
                     poll_document_statuses()
 
@@ -844,6 +902,7 @@ def render_sidebar():
             st.session_state.documents_hydrated = True
             st.session_state.history_error = None
             st.session_state.document_status_error = None
+            st.session_state.document_feedback = None
             st.session_state.upload_feedback = None
             st.session_state.uploader_key += 1
             st.rerun()
@@ -964,6 +1023,7 @@ def handle_chat_input(chat_container=None):
 init_session_state()
 hydrate_chat_history_once()
 hydrate_documents_once()
+sync_document_state_before_render()
 render_theme()
 render_sidebar()
 

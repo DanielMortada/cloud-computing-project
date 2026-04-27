@@ -79,7 +79,7 @@ flowchart TD
     UI -->|"POST /upload"| API
     UI -->|"POST /chat"| API
     UI -->|"GET /documents"| API
-    UI -->|"POST /documents/status"| API
+    UI -->|"DELETE /documents"| API
     UI -->|"GET /history"| API
     UI -->|"DELETE /history"| API
 
@@ -129,18 +129,24 @@ sequenceDiagram
 
     Note over Student,UI: 3. Wait for Ingestion
     loop Every 4 seconds while files are processing
-        UI->>API: POST /documents/status
-        API-->>UI: Per-document readiness
-        UI->>UI: Update status cards (processing → ready)
+        UI->>API: GET /documents?session_id=abc123
+        API-->>UI: Session document list + readiness summary
+        UI->>UI: Update cards + sync sidebar state
     end
 
-    Note over Student,UI: 4. Ask Questions
+    Note over Student,UI: 4. Delete a Document
+    Student->>UI: Clicks Delete on a document card
+    UI->>API: DELETE /documents?session_id=abc123&object_name=...
+    API-->>UI: { status: "deleted", ... }
+    UI->>UI: Remove the card and refresh session docs
+
+    Note over Student,UI: 5. Ask Questions
     Student->>UI: Types question in chat input
     UI->>API: POST /chat { question, session_id }
     API-->>UI: { answer, sources[] }
     UI->>UI: Display answer with citation expander
 
-    Note over Student,UI: 5. Quiz Mode
+    Note over Student,UI: 6. Quiz Mode
     Student->>UI: Types "/quiz"
     UI->>API: POST /chat { question: "/quiz", session_id }
     API-->>UI: 5-question MCQ based on uploaded notes
@@ -164,7 +170,7 @@ def init_session_state():
         st.session_state.session_id = query_session_id or str(uuid.uuid4())
 ```
 
-If you copy the URL and open it in another tab, you get the same conversation and the same session-scoped Documents list. If you click "New Session", a fresh UUID is generated and both chat and document state reset.
+If you copy the URL and open it in another tab, or close and reopen that same `?sid=...` link later, you get the same conversation and the same session-scoped Documents list. If you click "New Session", a fresh UUID is generated and both chat and document state reset.
 
 ### History Rehydration
 
@@ -182,7 +188,7 @@ def hydrate_chat_history_once():
     st.session_state.history_hydrated = True
 ```
 
-The `history_hydrated` flag ensures we don't reload history on every Streamlit re-run (which happens on every interaction).
+The `history_hydrated` flag ensures we don't reload history on every Streamlit re-run (which happens on every interaction). If the history request fails, the flag stays unset so a later rerun can retry instead of treating the failed restore as complete.
 
 ### Document Rehydration
 
@@ -200,7 +206,7 @@ def hydrate_documents_once():
     st.session_state.documents_hydrated = True
 ```
 
-This is what keeps the Documents tab populated after a browser refresh for the same `sid`.
+This is what keeps the Documents tab populated after a browser refresh or reopen for the same `sid`.
 
 ### File Upload Flow
 
@@ -208,7 +214,7 @@ The sidebar contains a file uploader widget. When the user clicks "Upload select
 
 1. Each file is sent individually to `POST /upload` via `requests.post`, together with the active `session_id`
 2. Successful uploads are tracked in `st.session_state.uploaded_documents`
-3. The UI immediately starts polling for ingestion status
+3. The UI immediately starts polling `GET /documents` for ingestion status
 
 ```mermaid
 stateDiagram-v2
@@ -223,7 +229,7 @@ stateDiagram-v2
 
 ### Automatic Status Polling with Fragments
 
-While any document is still processing, the UI uses Streamlit's **fragment** feature to auto-refresh the status panel every 4 seconds without re-running the entire page:
+While any document is still processing, the UI uses Streamlit's **fragment** feature to auto-refresh the session document list every 4 seconds:
 
 ```python
 @fragment(run_every=STATUS_POLL_INTERVAL_SECONDS)
@@ -233,7 +239,15 @@ def document_status_fragment():
     render_document_status_panel()
 ```
 
-This is important because a full Streamlit re-run would reset the chat input and other UI state. Fragments allow **partial page updates** — a relatively new Streamlit feature that makes the app feel more responsive.
+The UI compares a stable document-state signature and only triggers a full app rerun when a meaningful status change happens. That keeps the sidebar badges, chat welcome subtitle, and Documents tab in sync without constant unnecessary reruns.
+
+### Document Deletion
+
+Each document card includes a `Delete` button. When the user clicks it:
+
+1. The UI calls `DELETE /documents` with the active `session_id` and the card's `object_name`.
+2. The backend removes the PDF from the session-scoped GCS folder and deletes the matching indexed chunks.
+3. The UI refreshes `GET /documents` and removes the card from the current session state.
 
 ### Chat Interaction
 
@@ -308,6 +322,7 @@ Streamlit re-runs the entire script on every interaction. To persist data across
 | `documents_hydrated` | Boolean flag — have we restored the session's document list yet? |
 | `uploaded_documents` | List of upload metadata dicts with status info |
 | `upload_feedback` | Success/warning/error message from the last upload batch |
+| `document_feedback` | Success/warning/error message from document deletion |
 | `uploader_key` | Counter that resets the file uploader widget after upload |
 | `document_status_error` | Last error from status polling (if any) |
 
@@ -349,7 +364,7 @@ Service:     smartstudy-ui
 Platform:    Cloud Run (fully managed)
 Region:      europe-west1
 Image:       Built from streamlit_app/Dockerfile
-URL:         https://smartstudy-ui-omcgx7zncq-ew.a.run.app
+URL:         https://smartstudy-ui-959221029360.europe-west1.run.app
 Port:        8501 (Streamlit default)
 ```
 

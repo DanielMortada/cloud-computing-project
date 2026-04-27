@@ -116,6 +116,8 @@ def chat():
 
 The UI sends a JSON body with two fields: the user's `question` and a `session_id` that ties together the conversation history.
 
+Before retrieval begins, the API also classifies short social prompts such as `Hello`, `How are you?`, and `Thank you`. These bypass RAG entirely and return a direct assistant reply with `sources: []`, which prevents unrelated PDF citations on non-document chatter.
+
 **2. Retrieval — choosing the right strategy**
 
 Not all queries should be handled the same way. The function `retrieve_context_for_question()` routes between two session-scoped paths:
@@ -134,7 +136,9 @@ def retrieve_context_for_question(question: str, session_id: str) -> tuple[str, 
 
 - **`/quiz` command** → vector search on the literal string "/quiz" would be meaningless (no document chunk is semantically similar to the word "quiz"). Instead, we use MongoDB's `$sample` aggregation stage to randomly pick 10 chunks from the active session, giving Gemini broad material to generate a diverse quiz.
 
-**3. Session-scoped similarity ranking — how it works under the hood**
+The API also applies a minimum similarity threshold before using retrieved chunks as context. If the best-ranked chunk is still too weakly related to the question, the API returns its no-context answer with `sources: []` instead of forcing a citation from an unrelated document.
+
+**3. Session-scoped similarity ranking - how it works under the hood**
 
 To guarantee isolation between sessions without relying on a shared cross-session retrieval call, the Chat API:
 
@@ -261,6 +265,7 @@ flowchart TD
         C["POST /chat"]
         U["POST /upload"]
         D["GET /documents"]
+        DD["DELETE /documents"]
         S["POST /documents/status"]
         RH["GET /history"]
         DH["DELETE /history"]
@@ -269,7 +274,8 @@ flowchart TD
     H -->|"Health check"| R1["{ status: 'ok' }"]
     C -->|"RAG question answering"| R2["{ answer, sources }"]
     U -->|"Upload PDF → GCS"| R3["{ object_name, status }"]
-    D -->|"Restore session docs"| R4["{ documents: [...], summary }"]
+    D -->|"Restore or refresh session docs"| R4["{ documents: [...], summary }"]
+    DD -->|"Delete one session PDF"| R45["{ status: 'deleted', ... }"]
     S -->|"Check ingestion readiness"| R5["{ documents: [...], summary }"]
     RH -->|"Retrieve session messages"| R6["{ messages: [...] }"]
     DH -->|"Clear session history"| R7["{ status: 'cleared' }"]
@@ -291,9 +297,13 @@ object_name = f"{GCS_UPLOAD_PREFIX}/{session_id}/{base_name}-{uuid8}.pdf"
 blob.upload_from_string(file_bytes, content_type="application/pdf")
 ```
 
-### `GET /documents` — Session document rehydration
+### `GET /documents` - Session document rehydration and live sync
 
-The UI calls this endpoint on page load to rebuild the Documents tab after a refresh. The API lists objects only from the active session folder and returns their latest status summary.
+The UI calls this endpoint on page load to rebuild the Documents tab after a refresh or reopen, and reuses it for periodic live sync while files are still processing. The API lists objects only from the active session folder and returns their latest status summary.
+
+### `DELETE /documents` - Session document removal
+
+The UI calls this endpoint when the user deletes a document card. The API validates that the `object_name` belongs to the active `session_id`, deletes the PDF from GCS, and immediately removes indexed chunks for that same `(source, session_id)` pair.
 
 ### `POST /documents/status` — Ingestion readiness polling
 
@@ -307,6 +317,8 @@ chunk_count = collection.count_documents({"source": object_name})
 ```
 
 ### `GET /history` and `DELETE /history` — Session management
+
+- **GET** is what allows the UI to restore the same conversation after a refresh or when reopening the same `?sid=...` link.
 
 - **GET** returns all stored messages for a session, normalizing role names (`human` → `user`, `ai` → `assistant`) so the UI can display them directly.
 - **DELETE** clears the conversation history when the user starts a new session.
@@ -374,7 +386,7 @@ Service:     smartstudy-chat-api
 Platform:    Cloud Run (fully managed)
 Region:      europe-west1
 Image:       Built from chat_api/Dockerfile
-URL:         https://smartstudy-chat-api-omcgx7zncq-ew.a.run.app
+URL:         https://smartstudy-chat-api-959221029360.europe-west1.run.app
 Port:        8080 (injected via PORT env var)
 ```
 
