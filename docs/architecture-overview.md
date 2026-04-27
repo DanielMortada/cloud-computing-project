@@ -71,6 +71,7 @@ flowchart LR
 - Documents tab restored on refresh for the same session URL (`sid`).
 - Documents can be removed from the current session directly from the Documents tab.
 - Grounded Q&A with source citations.
+- Prompt-disclosure attempts are blocked before retrieval or model generation.
 - Short social prompts and no-context questions return without document citations.
 - Sources expander summaries are filtered to inline citations, so retrieved-but-unused documents are not shown as references.
 - Dedicated `/quiz` mode that builds quizzes from sampled indexed chunks instead of searching for the literal `/quiz` string.

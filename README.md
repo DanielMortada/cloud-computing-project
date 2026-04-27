@@ -219,6 +219,7 @@ Create a vector search index named `vector_index` on the `context` collection. T
 - The UI can remove one session-scoped PDF at a time through the Documents tab, which calls `DELETE /documents`.
 - Chat memory is persisted in MongoDB and restored on refresh or reopen using session-aware history hydration (`sid` + `GET /history`).
 - The Documents tab and sidebar status badges are restored and re-synced through session-aware document hydration (`sid` + `GET /documents`).
+- Prompt-disclosure attempts, such as requests to send the system prompt verbatim, are blocked before retrieval or model generation.
 - Short social prompts such as `Hello` and `How are you?` return source-free replies instead of citing uploaded PDFs.
 - The Sources expander lists only source labels that are also cited inline in the assistant answer.
 - Opening the app with a new or missing `sid` starts a new session by design, with an empty chat and an empty Documents pane.

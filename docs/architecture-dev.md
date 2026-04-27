@@ -168,19 +168,20 @@ Pipeline in `cloud_function/main.py -> cleanup_deleted_pdf`:
 ### F) Chat path (`POST /chat`)
 
 1. Read user question and `session_id`.
-2. Check for short social prompts such as `Hello`, `How are you?`, or `Thank you`; these bypass retrieval and return direct source-free replies.
-3. Otherwise choose retrieval strategy:
+2. Check for prompt-disclosure attempts such as requests to reveal the system prompt, developer message, hidden instructions, or exact prompt text. These bypass retrieval and return a direct refusal with no sources.
+3. Check for short social prompts such as `Hello`, `How are you?`, or `Thank you`; these bypass retrieval and return direct source-free replies.
+4. Otherwise choose retrieval strategy:
    - normal questions: load this session's indexed chunks and rank them by cosine similarity against the current query embedding
    - `/quiz`: randomly sample 10 indexed chunk records from Mongo `context` for this same session only
-4. If the best similarity score is below the minimum context threshold, or no session chunks exist, return a direct no-context answer with no sources.
-5. Normalize source/page metadata for citations.
-6. Compose prompt:
+5. If the best similarity score is below the minimum context threshold, or no session chunks exist, return a direct no-context answer with no sources.
+6. Normalize source/page metadata for citations.
+7. Compose prompt:
    - system tutor persona
    - conversation history (`MongoDBChatMessageHistory`)
    - retrieved context
-7. Generate answer with Gemini 2.5 Flash using `max_output_tokens=8192`.
-8. Filter the source summary against the generated answer, keeping only labels whose filename and page are cited inline.
-9. Return:
+8. Generate answer with Gemini 2.5 Flash using `max_output_tokens=8192`.
+9. Filter the source summary against the generated answer, keeping only labels whose filename and page are cited inline.
+10. Return:
    - `answer`
    - deduplicated, cited-only `sources` list
 
