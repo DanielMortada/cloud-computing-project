@@ -292,7 +292,14 @@ flowchart TD
 
 ### `POST /upload` — File upload gateway
 
-The UI sends PDFs here together with a `session_id`. The API validates the file (PDF only, ≤ 25 MB, non-empty), generates a unique object name inside the active session folder, and uploads it to GCS. This triggers the Cloud Function ingestion pipeline automatically:
+Current upload handling is session-aware and deduplicated:
+
+- The API computes `content_sha256` from the uploaded PDF bytes.
+- If the same hash already exists in the session, the existing object is reused and no duplicate copy is uploaded.
+- If the same normalized filename exists with different bytes, the new file becomes the active version and the older same-title object plus vectors are deleted.
+- New objects store `session_id`, `original_name`, `content_sha256`, and `document_title_key` as GCS metadata.
+
+When a new object is needed, the API generates a unique object name inside the active session folder and uploads it to GCS. This triggers the Cloud Function ingestion pipeline automatically:
 
 ```python
 object_name = f"{GCS_UPLOAD_PREFIX}/{session_id}/{base_name}-{uuid8}.pdf"

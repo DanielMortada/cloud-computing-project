@@ -11,6 +11,7 @@ Deployed to Cloud Run (or run locally for development).
 """
 
 import os
+import hashlib
 import re
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +46,10 @@ GCS_UPLOAD_PREFIX = os.environ.get("GCS_UPLOAD_PREFIX", "uploads")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "25"))
 MIN_CONTEXT_SIMILARITY = float(os.environ.get("MIN_CONTEXT_SIMILARITY", "0.35"))
 PORT = int(os.environ.get("PORT", 8080))
+
+CONTENT_HASH_METADATA_KEY = "content_sha256"
+DOCUMENT_TITLE_KEY_METADATA_KEY = "document_title_key"
+ORIGINAL_NAME_METADATA_KEY = "original_name"
 
 # ---------------------------------------------------------------------------
 # System prompt — Formal Academic Tutor persona
@@ -149,6 +154,91 @@ def _display_source_name(source: str) -> str:
     """Return a user-facing filename for citations and status cards."""
     clean_source = (source or "").strip()
     return os.path.basename(clean_source) or clean_source or "unknown"
+
+
+def _content_sha256(file_bytes: bytes) -> str:
+    """Return a stable SHA-256 digest for uploaded file bytes."""
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def _document_title_key(filename: str) -> str:
+    """Return the normalized per-session key used for title versioning."""
+    safe_name = secure_filename((filename or "").strip())
+    return safe_name.lower()
+
+
+def _derive_original_name_from_object_name(object_name: str) -> str:
+    """Best-effort original filename reconstruction for older uploads."""
+    filename = os.path.basename((object_name or "").strip())
+    match = re.match(r"^(?P<base>.+)-[0-9a-f]{8}(?P<ext>\.pdf)$", filename, flags=re.IGNORECASE)
+    if match:
+        return f"{match.group('base')}{match.group('ext')}"
+    return filename
+
+
+def _safe_blob_metadata(blob) -> dict:
+    """Load custom blob metadata when available."""
+    try:
+        blob.reload()
+    except Exception as exc:
+        print(f"Warning: could not reload metadata for {blob.name}: {exc}")
+    return dict(blob.metadata or {})
+
+
+def _blob_content_hash(blob, metadata: dict) -> str:
+    """Return a blob SHA-256 hash, backfilling metadata for older uploads when possible."""
+    existing_hash = (metadata.get(CONTENT_HASH_METADATA_KEY) or "").strip()
+    if existing_hash:
+        return existing_hash
+
+    try:
+        digest = _content_sha256(blob.download_as_bytes())
+        metadata[CONTENT_HASH_METADATA_KEY] = digest
+        blob.metadata = metadata
+        blob.patch()
+        return digest
+    except Exception as exc:
+        print(f"Warning: could not compute content hash for {blob.name}: {exc}")
+        return ""
+
+
+def list_session_document_records(session_id: str) -> list[dict]:
+    """List session PDFs with metadata used by upload dedup/versioning."""
+    if not session_id or not GCS_BUCKET_NAME:
+        return []
+
+    bucket = get_storage_client().bucket(GCS_BUCKET_NAME)
+    prefix = f"{build_session_upload_prefix(session_id).rstrip('/')}/"
+    records = []
+
+    for blob in bucket.list_blobs(prefix=prefix):
+        if not blob.name or not blob.name.lower().endswith(".pdf"):
+            continue
+
+        metadata = _safe_blob_metadata(blob)
+        original_name = (
+            metadata.get(ORIGINAL_NAME_METADATA_KEY)
+            or metadata.get("original_name")
+            or _derive_original_name_from_object_name(blob.name)
+        )
+        title_key = (
+            metadata.get(DOCUMENT_TITLE_KEY_METADATA_KEY)
+            or _document_title_key(original_name)
+        )
+        content_hash = _blob_content_hash(blob, metadata)
+
+        records.append(
+            {
+                "blob": blob,
+                "object_name": blob.name,
+                "source_name": _display_source_name(blob.name),
+                "original_name": original_name,
+                "document_title_key": title_key,
+                "content_sha256": content_hash,
+            }
+        )
+
+    return records
 
 
 def _normalize_prompt_for_match(question: str) -> str:
@@ -857,23 +947,97 @@ def upload():
     if len(file_bytes) > max_upload_bytes:
         return jsonify({"error": f"File too large. Max size is {MAX_UPLOAD_MB} MB."}), 413
 
-    object_name = build_upload_object_name(safe_name, session_id)
+    content_hash = _content_sha256(file_bytes)
+    document_title_key = _document_title_key(original_name)
     upload_id = uuid.uuid4().hex
 
     try:
         client = get_storage_client()
         bucket = client.bucket(GCS_BUCKET_NAME)
+
+        existing_documents = list_session_document_records(session_id)
+        duplicate_documents = [
+            document
+            for document in existing_documents
+            if document.get("content_sha256") == content_hash
+        ]
+        duplicate_document = duplicate_documents[0] if duplicate_documents else None
+        same_title_documents = [
+            document
+            for document in existing_documents
+            if document.get("document_title_key") == document_title_key
+            and document.get("content_sha256") != content_hash
+        ]
+
+        if duplicate_document is not None:
+            replacement_candidates = same_title_documents + duplicate_documents[1:]
+            seen_replacements = set()
+            replaced_documents = []
+            for document in replacement_candidates:
+                object_to_delete = document["object_name"]
+                if (
+                    object_to_delete == duplicate_document["object_name"]
+                    or object_to_delete in seen_replacements
+                ):
+                    continue
+                seen_replacements.add(object_to_delete)
+                replaced_documents.append(delete_session_document(object_to_delete, session_id))
+
+            status = get_document_status(
+                object_name=duplicate_document["object_name"],
+                source_name=duplicate_document["source_name"],
+                session_id=session_id,
+            )
+            return jsonify(
+                {
+                    "status": "duplicate",
+                    "upload_action": "reused_duplicate",
+                    "message": "This PDF already exists in this session. Reused the existing copy.",
+                    "upload_id": upload_id,
+                    "session_id": session_id,
+                    "bucket": GCS_BUCKET_NAME,
+                    "object_name": duplicate_document["object_name"],
+                    "source_name": duplicate_document["source_name"],
+                    "original_name": duplicate_document["original_name"],
+                    "size_bytes": len(file_bytes),
+                    "content_sha256": content_hash,
+                    "document_title_key": duplicate_document["document_title_key"],
+                    "document_status": status["status"],
+                    "ready": status["ready"],
+                    "chunk_count": status["chunk_count"],
+                    "replaced_count": len(replaced_documents),
+                    "replaced_documents": replaced_documents,
+                    "status_poll_path": "/documents/status",
+                    "status_poll_after_seconds": 4,
+                }
+            )
+
+        object_name = build_upload_object_name(safe_name, session_id)
         blob = bucket.blob(object_name)
         blob.metadata = {
             "session_id": session_id,
-            "original_name": original_name,
+            ORIGINAL_NAME_METADATA_KEY: original_name,
+            CONTENT_HASH_METADATA_KEY: content_hash,
+            DOCUMENT_TITLE_KEY_METADATA_KEY: document_title_key,
         }
         blob.upload_from_string(file_bytes, content_type="application/pdf")
+
+        replaced_documents = [
+            delete_session_document(document["object_name"], session_id)
+            for document in same_title_documents
+        ]
+        upload_action = "replaced_version" if replaced_documents else "uploaded"
+        message = (
+            f"New version uploaded. Replaced {len(replaced_documents)} previous file(s) with the same title."
+            if replaced_documents
+            else "PDF uploaded. Ingestion will start automatically."
+        )
 
         return jsonify(
             {
                 "status": "uploaded",
-                "message": "PDF uploaded. Ingestion will start automatically.",
+                "upload_action": upload_action,
+                "message": message,
                 "upload_id": upload_id,
                 "session_id": session_id,
                 "bucket": GCS_BUCKET_NAME,
@@ -881,6 +1045,13 @@ def upload():
                 "source_name": os.path.basename(object_name),
                 "original_name": original_name,
                 "size_bytes": len(file_bytes),
+                "content_sha256": content_hash,
+                "document_title_key": document_title_key,
+                "document_status": "processing",
+                "ready": False,
+                "chunk_count": 0,
+                "replaced_count": len(replaced_documents),
+                "replaced_documents": replaced_documents,
                 "status_poll_path": "/documents/status",
                 "status_poll_after_seconds": 4,
             }

@@ -46,7 +46,7 @@ flowchart LR
 ## Main User Journey
 
 1. Student selects one or more PDFs and uploads them in one batch from the UI.
-2. Each file is stored in the cloud bucket under a session-scoped folder with a unique object name.
+2. The upload gateway deduplicates exact-content repeats, replaces older same-title versions, and stores only needed new files under the session-scoped bucket folder.
 3. An ingestion function automatically processes each PDF:
    - reads text
    - chunks text
@@ -65,6 +65,7 @@ flowchart LR
 - Cloud-native upload pipeline from UI to GCS.
 - Batch multi-PDF upload from one UI action.
 - Session-scoped upload paths in GCS (`uploads/<sid>/...`) to isolate study materials.
+- Per-session upload deduplication by SHA-256 content hash and normalized filename versioning.
 - Automatic ingestion from GCS events.
 - Live per-document readiness notifications in UI via session document polling.
 - Documents tab restored on refresh for the same session URL (`sid`).
@@ -97,6 +98,7 @@ flowchart LR
 - Session continuity depends on keeping the same `sid` in the URL; opening a new or different session starts with empty chat and empty Documents state.
 - If multiple PDFs are active, citation lists may show multiple files by design.
 - The ingestion function still runs a bucket-to-Mongo reconciliation safety scan after uploads; acceptable for project scale, but not ideal for very large corpora.
+- Upload deduplication is exact-content based; visually similar PDFs with different bytes are treated as different content.
 - User authentication and strict user identity isolation are not enabled yet; current isolation is session-based.
 
 ## Next Evolution (When Needed)

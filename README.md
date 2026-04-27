@@ -212,6 +212,8 @@ Create a vector search index named `vector_index` on the `context` collection. T
 
 - Uploads are handled by the Chat API through `/upload`, not by direct browser-to-GCS writes.
 - Each upload is namespaced under `uploads/<session_id>/...`, which isolates one session's study materials from another.
+- Uploads are deduplicated per session with SHA-256 content hashes. Re-uploading identical bytes reuses the existing object, even under a different filename.
+- Re-uploading the same normalized filename with different content creates a new version and removes the previous same-title object and vectors.
 - Ingestion is event-driven and reproducible: a finalized object in GCS is what starts PDF processing.
 - Cleanup is also event-driven: deleting a PDF from GCS removes its stored vectors.
 - The UI can remove one session-scoped PDF at a time through the Documents tab, which calls `DELETE /documents`.

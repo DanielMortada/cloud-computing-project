@@ -651,9 +651,12 @@ def upload_selected_pdfs(uploaded_files) -> tuple[list[dict], list[str]]:
                         "object_name": object_name,
                         "source_name": data.get("source_name") or os.path.basename(object_name),
                         "original_name": data.get("original_name") or uploaded_pdf.name,
-                        "status": "processing",
-                        "ready": False,
-                        "chunk_count": 0,
+                        "status": data.get("document_status", "processing"),
+                        "ready": bool(data.get("ready", False)),
+                        "chunk_count": data.get("chunk_count", 0),
+                        "upload_action": data.get("upload_action", "uploaded"),
+                        "replaced_count": data.get("replaced_count", 0),
+                        "content_sha256": data.get("content_sha256"),
                         "message": data.get(
                             "message",
                             "Upload complete. Waiting for ingestion to finish.",
@@ -676,6 +679,34 @@ def upload_selected_pdfs(uploaded_files) -> tuple[list[dict], list[str]]:
     progress.progress(1.0, text="Upload batch complete.")
     progress.empty()
     return successful_uploads, errors
+
+
+def build_upload_success_message(successful_uploads: list[dict]) -> str:
+    """Summarize upload actions without implying every file created a new object."""
+    total = len(successful_uploads)
+    reused = sum(
+        1 for upload in successful_uploads
+        if upload.get("upload_action") == "reused_duplicate"
+    )
+    uploaded = sum(
+        1 for upload in successful_uploads
+        if upload.get("upload_action") == "uploaded"
+    )
+    replaced = sum(
+        1 for upload in successful_uploads
+        if upload.get("upload_action") == "replaced_version"
+    )
+
+    parts = []
+    if uploaded:
+        parts.append(f"uploaded {uploaded} new")
+    if replaced:
+        parts.append(f"uploaded {replaced} replacement")
+    if reused:
+        parts.append(f"reused {reused} existing")
+
+    summary = ", ".join(parts) if parts else f"processed {total}"
+    return f"Processed {total} PDF(s): {summary}."
 
 
 def poll_document_statuses(force: bool = False):
@@ -915,16 +946,13 @@ def render_sidebar():
                 if successful_uploads and not errors:
                     st.session_state.upload_feedback = {
                         "kind": "success",
-                        "message": (
-                            f"Queued {len(successful_uploads)} PDF(s). "
-                            "Each card will switch to ready as soon as ingestion completes."
-                        ),
+                        "message": build_upload_success_message(successful_uploads),
                     }
                 elif successful_uploads and errors:
                     st.session_state.upload_feedback = {
                         "kind": "warning",
                         "message": (
-                            f"Uploaded {len(successful_uploads)} PDF(s), "
+                            f"{build_upload_success_message(successful_uploads)} "
                             f"with {len(errors)} issue(s): {' | '.join(errors)}"
                         ),
                     }

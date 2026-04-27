@@ -100,11 +100,18 @@ flowchart TD
    - filename non-empty
    - extension `.pdf`
    - size <= `MAX_UPLOAD_MB`
-4. Chat API writes each object to:
+4. Chat API computes:
+   - `content_sha256`: SHA-256 hash of the uploaded bytes
+   - `document_title_key`: normalized filename key used for same-title versioning
+5. Chat API scans the current session folder:
+   - if the same `content_sha256` already exists, no new object is written and the existing object is reused
+   - if the same `document_title_key` exists with different content, the new object is accepted and the previous same-title object plus vectors are deleted
+6. New uploads are written to:
    - `gs://smartstudy-pdfs-491919/uploads/<session_id>/<secure_name>-<uuid8>.pdf`
-5. Chat API returns upload metadata including `session_id`, `object_name`, `source_name`, and `upload_id`.
-6. GCS emits `object.finalized` events.
-7. `smartstudy-ingest` executes ingestion per uploaded object.
+7. Chat API stores GCS metadata including `session_id`, `original_name`, `content_sha256`, and `document_title_key`.
+8. Chat API returns upload metadata including `session_id`, `object_name`, `source_name`, `upload_id`, `upload_action`, and replacement details.
+9. GCS emits `object.finalized` events for new uploads.
+10. `smartstudy-ingest` executes ingestion per newly uploaded object.
 
 ### B) Document rehydration + readiness path (`GET /documents`)
 
@@ -214,6 +221,24 @@ Notes:
 - Keyed by `session_id`.
 - Persists backend conversation state.
 
+### GCS object metadata
+
+New uploads store these metadata fields:
+
+```json
+{
+  "session_id": "123e4567-e89b-12d3-a456-426614174000",
+  "original_name": "lecture.pdf",
+  "content_sha256": "e3b0c442...",
+  "document_title_key": "lecture.pdf"
+}
+```
+
+Notes:
+- `content_sha256` prevents duplicate copies of byte-identical PDFs within one session.
+- `document_title_key` allows same-title uploads with new bytes to replace older same-title versions.
+- Older objects without hash metadata are hashed lazily by the Chat API the next time an upload scans that session.
+
 ## 5) Operational Commands (Dev Runbook)
 
 ### Verify deployments
@@ -300,6 +325,7 @@ gcloud functions deploy smartstudy-cleanup \
 - Anyone with the same `sid` can view the same chat history and session document namespace; authentication is not enforced yet.
 - Source list may include multiple active files if user uploads several PDFs; expected behavior.
 - Readiness and sidebar sync are inferred from indexed chunk presence and storage checks, so status is near-real-time but event-driven.
+- Upload deduplication only detects exact byte-identical PDFs. Near-duplicate content with different PDF bytes is not collapsed.
 - `reconcile_context_with_bucket()` still performs a full bucket + collection consistency scan after each upload as a safety net; useful for resilience at demo scale, but not the most scalable long-term design.
 - Optional future hardening:
   - add authenticated document ownership instead of URL-session isolation alone

@@ -213,8 +213,9 @@ This is what keeps the Documents tab populated after a browser refresh or reopen
 The sidebar contains a file uploader widget. When the user clicks "Upload selected PDFs":
 
 1. Each file is sent individually to `POST /upload` via `requests.post`, together with the active `session_id`
-2. Successful uploads are tracked in `st.session_state.uploaded_documents`
-3. The UI immediately starts polling `GET /documents` for ingestion status
+2. The API may upload a new object, reuse an exact duplicate already in the session, or replace an older same-title version
+3. Successful results are tracked in `st.session_state.uploaded_documents`
+4. The UI immediately starts polling `GET /documents` for ingestion status
 
 ```mermaid
 stateDiagram-v2
