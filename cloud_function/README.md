@@ -1,5 +1,19 @@
 # ☁️ Cloud Function — Event-Driven PDF Ingestion & Cleanup
 
+## Where This Fits in the Docs
+
+This README explains the Cloud Function code in `main.py`: how `process_pdf` ingests finalized GCS objects and how `cleanup_deleted_pdf` removes vectors after deletion events.
+
+For the wider system context and deployment-level wiring, use:
+
+- [Architecture overview](../docs/architecture-overview.md) for the non-technical system flow.
+- [Developer deep dive](../docs/architecture-dev.md#3-requestprocessing-paths) for the exact ingestion and cleanup paths.
+- [Operational runbook](../docs/architecture-dev.md#5-operational-commands-dev-runbook) for Eventarc trigger filters, deployment commands, verification commands, and logs.
+
+Important boundary: `main.py` does not create Eventarc triggers. It only declares CloudEvent-compatible function entry points. Eventarc routing is configured when the functions are deployed.
+
+---
+
 ## What Is a Google Cloud Function?
 
 A **Cloud Function** is a lightweight, single-purpose piece of code that Google runs for you _without you managing any server_. You don't provision a VM, configure an OS, or install a web server. You hand Google a Python file, tell it _"run this whenever X happens"_, and Google takes care of the rest — spinning up an execution environment, running your code, then scaling back down to zero when there's nothing to do.
@@ -46,6 +60,8 @@ Each event arrives as a **CloudEvent** — an industry-standard envelope that ca
 - **data** — the payload (e.g. the uploaded file's metadata: name, size, content type)
 
 Your function receives this CloudEvent object and can inspect its `.data` dictionary to decide what to do.
+
+In SmartStudy, the matching Eventarc triggers are created during deployment with `--trigger-event-filters`. Without that deployed trigger wiring, `main.py` would not be invoked by a bucket upload even though the upload still exists in GCS.
 
 ---
 
@@ -272,6 +288,18 @@ Trigger:      Eventarc → GCS bucket events
 ```
 
 The function has no Dockerfile — Google provides the runtime. We just supply `main.py` and `requirements.txt`, and the Functions Framework handles the HTTP-to-CloudEvent translation.
+
+The Eventarc trigger is created by the deployment command, not by Python code. The key deployment filters are:
+
+```bash
+--trigger-event-filters=type=google.cloud.storage.object.v1.finalized
+--trigger-event-filters=bucket=smartstudy-pdfs-491919
+
+--trigger-event-filters=type=google.cloud.storage.object.v1.deleted
+--trigger-event-filters=bucket=smartstudy-pdfs-491919
+```
+
+At runtime, those routed events manifest as Cloud Function invocations and as the `cloud_event` argument passed into `process_pdf(cloud_event)` or `cleanup_deleted_pdf(cloud_event)`. See the developer runbook for the exact `gcloud functions describe`, Eventarc trigger inspection, and log commands.
 
 ---
 

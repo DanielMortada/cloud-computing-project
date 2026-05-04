@@ -1,5 +1,18 @@
 # 🤖 Chat API — RAG-Powered Academic Tutor Backend
 
+## Where This Fits in the Docs
+
+This README explains the Flask service in `main.py`: HTTP endpoints, upload orchestration, session-scoped retrieval, RAG prompting, document status checks, and chat history.
+
+For the wider system context and deployment-level detail, use:
+
+- [Architecture overview](../docs/architecture-overview.md) for the non-technical system flow.
+- [Developer deep dive](../docs/architecture-dev.md#3-requestprocessing-paths) for upload, delete, chat, and session rehydration paths.
+- [Data model reference](../docs/architecture-dev.md#4-data-model-current) for MongoDB and GCS object metadata shapes.
+- [Operational runbook](../docs/architecture-dev.md#5-operational-commands-dev-runbook) for Cloud Run deployment, verification, and API test commands.
+
+---
+
 ## What Is Cloud Run?
 
 **Cloud Run** is Google's fully managed platform for running containerized applications. You give Google a Docker container, and Cloud Run handles deployment, TLS certificates, scaling, load balancing, and even scaling down to zero when there's no traffic.
@@ -404,6 +417,8 @@ Environment variables are set at deploy time and include:
 - GCP project ID and region
 - GCS bucket name and upload prefix
 - Vertex AI model identifiers
+
+The exact active conventions, deployment command, and verification commands live in the developer runbook rather than being duplicated here.
 
 ---
 

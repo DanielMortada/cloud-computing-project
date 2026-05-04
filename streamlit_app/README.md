@@ -1,5 +1,17 @@
 # 🎓 Streamlit App — Cloud-Hosted Interactive Frontend
 
+## Where This Fits in the Docs
+
+This README explains the Streamlit frontend in `app.py`: session state, upload controls, document polling, chat rendering, and UI-to-API communication.
+
+For the wider system context and deployment-level detail, use:
+
+- [Architecture overview](../docs/architecture-overview.md) for the non-technical system flow.
+- [Developer deep dive](../docs/architecture-dev.md#3-requestprocessing-paths) for document rehydration, readiness polling, deletion, chat, and session restore paths.
+- [Operational runbook](../docs/architecture-dev.md#5-operational-commands-dev-runbook) for Cloud Run deployment and verification commands.
+
+---
+
 ## What Is Streamlit?
 
 **Streamlit** is a Python framework that turns data scripts into interactive web applications — with no HTML, CSS, or JavaScript required. You write Python, and Streamlit generates a reactive web UI automatically.
@@ -372,6 +384,8 @@ Port:        8501 (Streamlit default)
 ```
 
 The only environment variable the UI needs is `CHAT_API_URL` — the internal URL of the Chat API service. Everything else is handled by the Chat API.
+
+The exact Cloud Run deploy command and live service verification commands live in the developer runbook rather than being duplicated here.
 
 ---
 

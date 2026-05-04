@@ -30,6 +30,17 @@ For diagrams and deeper implementation notes, see:
 - [Architecture overview](docs/architecture-overview.md)
 - [Architecture deep dive](docs/architecture-dev.md)
 
+## Documentation Map
+
+Use the READMEs for local module explanations, and use the architecture docs for cross-service flow and deployment granularity:
+
+| Area | Local code guide | Deeper architecture / runbook detail |
+|---|---|---|
+| Whole system | This README | [High-level overview](docs/architecture-overview.md), [developer deep dive](docs/architecture-dev.md) |
+| Streamlit UI | [streamlit_app/README.md](streamlit_app/README.md) | [UI flow and session rehydration](docs/architecture-dev.md#3-requestprocessing-paths), [Cloud Run operations](docs/architecture-dev.md#5-operational-commands-dev-runbook) |
+| Chat API | [chat_api/README.md](chat_api/README.md) | [Upload, delete, chat, and data model paths](docs/architecture-dev.md#3-requestprocessing-paths), [runtime data model](docs/architecture-dev.md#4-data-model-current) |
+| Cloud Functions | [cloud_function/README.md](cloud_function/README.md) | [Ingestion and cleanup paths](docs/architecture-dev.md#3-requestprocessing-paths), [Eventarc trigger and deployment commands](docs/architecture-dev.md#5-operational-commands-dev-runbook) |
+
 ## Repository Layout
 
 ```text

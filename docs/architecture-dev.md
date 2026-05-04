@@ -1,8 +1,19 @@
 # SmartStudy Architecture - Developer Deep Dive
 
-Last updated: 2026-04-27
+Last updated: 2026-05-04
 
 This document is the technical reference for the current production setup and data flow.
+
+## 0) Code and Documentation Map
+
+The module READMEs explain local code behavior. This document is the canonical place for cross-service flow, deployment wiring, runtime conventions, and operational commands.
+
+| Area | Main scripts | Local README | Deeper detail in this document |
+|---|---|---|---|
+| Repository setup | `README.md`, `.env.example` | [Project README](../README.md) | [Current topology](#1-current-deployed-topology-live), [operational commands](#5-operational-commands-dev-runbook) |
+| Streamlit UI | `streamlit_app/app.py`, `streamlit_app/Dockerfile` | [Streamlit README](../streamlit_app/README.md) | [Document rehydration](#b-document-rehydration--readiness-path-get-documents), [session rehydration](#g-session-rehydration-get-history--get-documents--ui-sid), [Cloud Run operations](#5-operational-commands-dev-runbook) |
+| Chat API | `chat_api/main.py`, `chat_api/Dockerfile` | [Chat API README](../chat_api/README.md) | [Upload path](#a-upload-path-user-triggered), [document delete path](#c-document-delete-path-delete-documents), [chat path](#f-chat-path-post-chat), [data model](#4-data-model-current) |
+| Cloud Functions | `cloud_function/main.py`, `cloud_function/requirements.txt` | [Cloud Function README](../cloud_function/README.md) | [Ingestion path](#d-ingestion-path-smartstudy-ingest), [delete-sync path](#e-delete-sync-path-smartstudy-cleanup), [Eventarc/deploy runbook](#5-operational-commands-dev-runbook) |
 
 ## 1) Current Deployed Topology (Live)
 
@@ -251,6 +262,51 @@ gcloud functions describe smartstudy-ingest --gen2 --region=europe-west1 --proje
 gcloud functions describe smartstudy-cleanup --gen2 --region=europe-west1 --project=smart-study-491919
 ```
 
+### Verify Eventarc trigger wiring
+
+`cloud_function/main.py` starts after Eventarc has already delivered a CloudEvent. The trigger filters that connect GCS to the function are deployment configuration, not Python code.
+
+Use the function description to inspect the event trigger attached to each Gen2 function:
+
+```bash
+gcloud functions describe smartstudy-ingest \
+  --gen2 \
+  --region=europe-west1 \
+  --project=smart-study-491919 \
+  --format="yaml(eventTrigger)"
+
+gcloud functions describe smartstudy-cleanup \
+  --gen2 \
+  --region=europe-west1 \
+  --project=smart-study-491919 \
+  --format="yaml(eventTrigger)"
+```
+
+Expected trigger intent:
+
+| Function | Event type | Bucket filter | Python entry point |
+|---|---|---|---|
+| `smartstudy-ingest` | `google.cloud.storage.object.v1.finalized` | `smartstudy-pdfs-491919` | `process_pdf` |
+| `smartstudy-cleanup` | `google.cloud.storage.object.v1.deleted` | `smartstudy-pdfs-491919` | `cleanup_deleted_pdf` |
+
+To inspect the Eventarc resources directly:
+
+```bash
+gcloud eventarc triggers list \
+  --location=europe-west1 \
+  --project=smart-study-491919
+
+gcloud eventarc triggers describe TRIGGER_NAME \
+  --location=europe-west1 \
+  --project=smart-study-491919
+```
+
+The concrete trigger name is visible from the function description and from the trigger list. Events manifest in this project as:
+
+- Cloud Function invocations.
+- Cloud Function logs, for example `Processing: gs://...` or `Deleted N vectors...`.
+- The `cloud_event.data` dictionary received by `process_pdf` or `cleanup_deleted_pdf`, containing GCS object metadata such as `bucket` and `name`.
+
 ### List session documents via API
 
 ```bash
@@ -292,7 +348,11 @@ gcloud functions logs read smartstudy-cleanup --region=europe-west1 --limit=100
 
 ### Redeploy functions
 
+Run from the function source directory so `--source=.` contains `cloud_function/main.py` and `cloud_function/requirements.txt`. These commands show the full trigger wiring plus runtime environment. For a redeploy where the environment already exists and only code changed, `--update-env-vars` can be used instead of replacing the full environment set.
+
 ```bash
+cd cloud_function
+
 # Ingest
 gcloud functions deploy smartstudy-ingest \
   --gen2 \
@@ -304,7 +364,8 @@ gcloud functions deploy smartstudy-ingest \
   --trigger-event-filters=type=google.cloud.storage.object.v1.finalized \
   --trigger-event-filters=bucket=smartstudy-pdfs-491919 \
   --memory=1Gi \
-  --timeout=300s
+  --timeout=300s \
+  --set-env-vars="MONGODB_URI=YOUR_MONGODB_URI,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,GCP_PROJECT_ID=smart-study-491919,GCP_REGION=europe-west1,GCS_BUCKET_NAME=smartstudy-pdfs-491919,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005"
 
 # Cleanup
 gcloud functions deploy smartstudy-cleanup \
@@ -317,7 +378,44 @@ gcloud functions deploy smartstudy-cleanup \
   --trigger-event-filters=type=google.cloud.storage.object.v1.deleted \
   --trigger-event-filters=bucket=smartstudy-pdfs-491919 \
   --memory=1Gi \
-  --timeout=300s
+  --timeout=300s \
+  --set-env-vars="MONGODB_URI=YOUR_MONGODB_URI,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,GCP_PROJECT_ID=smart-study-491919,GCP_REGION=europe-west1,GCS_BUCKET_NAME=smartstudy-pdfs-491919"
+
+cd ..
+```
+
+### Redeploy Chat API
+
+Run from the service directory so `--source=.` points at `chat_api/Dockerfile` and `chat_api/main.py`.
+
+```bash
+cd chat_api
+
+gcloud run deploy smartstudy-chat-api \
+  --source=. \
+  --project=smart-study-491919 \
+  --region=europe-west1 \
+  --allow-unauthenticated \
+  --memory=1Gi \
+  --set-env-vars="MONGODB_URI=YOUR_MONGODB_URI,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,MONGODB_CHAT_HISTORY_COLLECTION=chat_history,MONGODB_VECTOR_INDEX_NAME=vector_index,GCP_PROJECT_ID=smart-study-491919,GCP_REGION=europe-west1,GCS_BUCKET_NAME=smartstudy-pdfs-491919,GCS_UPLOAD_PREFIX=uploads,MAX_UPLOAD_MB=25,MIN_CONTEXT_SIMILARITY=0.35,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005,VERTEX_AI_LLM_MODEL=gemini-2.5-flash"
+
+cd ..
+```
+
+### Redeploy Streamlit UI
+
+```bash
+cd streamlit_app
+
+gcloud run deploy smartstudy-ui \
+  --source=. \
+  --project=smart-study-491919 \
+  --region=europe-west1 \
+  --allow-unauthenticated \
+  --port=8501 \
+  --set-env-vars="CHAT_API_URL=https://smartstudy-chat-api-959221029360.europe-west1.run.app,UPLOAD_TIMEOUT_SECONDS=180,STATUS_POLL_INTERVAL_SECONDS=4,STATUS_REQUEST_TIMEOUT_SECONDS=15,HISTORY_REQUEST_TIMEOUT_SECONDS=15"
+
+cd ..
 ```
 
 ## 6) Current Caveats and Planned Improvements

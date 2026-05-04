@@ -1,8 +1,18 @@
 # SmartStudy Architecture - High-Level Overview
 
-Last updated: 2026-04-27
+Last updated: 2026-05-04
 
 This is the quick, non-technical view of what the system does today.
+
+## Where to Read More
+
+| Need | Read |
+|---|---|
+| Setup commands and repository-level usage | [Project README](../README.md) |
+| Developer runbook, deployment wiring, and exact processing paths | [Architecture developer deep dive](architecture-dev.md) |
+| Streamlit UI behavior | [Streamlit README](../streamlit_app/README.md) |
+| Chat API endpoints and RAG behavior | [Chat API README](../chat_api/README.md) |
+| Cloud Function ingestion, cleanup, and CloudEvent handling | [Cloud Function README](../cloud_function/README.md) |
 
 ## Big Picture
 
