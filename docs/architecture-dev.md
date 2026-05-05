@@ -11,6 +11,7 @@ The module READMEs explain local code behavior. This document is the canonical p
 | Area | Main scripts | Local README | Deeper detail in this document |
 |---|---|---|---|
 | Repository setup | `README.md`, `.env.example` | [Project README](../README.md) | [Current topology](#1-current-deployed-topology-live), [operational commands](#5-operational-commands-dev-runbook) |
+| Lab-to-project transition | `project-context.md`, external `../lab_code/` baseline | [Transition summary](lab-to-project-transition.md) | This document covers the final system details after that transition |
 | Streamlit UI | `streamlit_app/app.py`, `streamlit_app/Dockerfile` | [Streamlit README](../streamlit_app/README.md) | [Document rehydration](#b-document-rehydration--readiness-path-get-documents), [session rehydration](#g-session-rehydration-get-history--get-documents--ui-sid), [Cloud Run operations](#5-operational-commands-dev-runbook) |
 | Chat API | `chat_api/main.py`, `chat_api/Dockerfile` | [Chat API README](../chat_api/README.md) | [Upload path](#a-upload-path-user-triggered), [document delete path](#c-document-delete-path-delete-documents), [chat path](#f-chat-path-post-chat), [data model](#4-data-model-current) |
 | Cloud Functions | `cloud_function/main.py`, `cloud_function/requirements.txt` | [Cloud Function README](../cloud_function/README.md) | [Ingestion path](#d-ingestion-path-smartstudy-ingest), [delete-sync path](#e-delete-sync-path-smartstudy-cleanup), [Eventarc/deploy runbook](#5-operational-commands-dev-runbook) |

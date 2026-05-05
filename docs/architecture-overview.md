@@ -9,6 +9,7 @@ This is the quick, non-technical view of what the system does today.
 | Need | Read |
 |---|---|
 | Setup commands and repository-level usage | [Project README](../README.md) |
+| Transition from the lab baseline to this project | [Lab-to-project transition](lab-to-project-transition.md) |
 | Developer runbook, deployment wiring, and exact processing paths | [Architecture developer deep dive](architecture-dev.md) |
 | Streamlit UI behavior | [Streamlit README](../streamlit_app/README.md) |
 | Chat API endpoints and RAG behavior | [Chat API README](../chat_api/README.md) |
