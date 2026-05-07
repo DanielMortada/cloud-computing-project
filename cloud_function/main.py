@@ -19,12 +19,26 @@ from pymongo import MongoClient
 MONGODB_URI = os.environ.get("MONGODB_URI", "")
 MONGODB_DB_NAME = os.environ.get("MONGODB_DB_NAME", "smartstudy")
 MONGODB_COLLECTION = os.environ.get("MONGODB_COLLECTION", "context")
+MONGODB_DOCUMENT_STATUS_COLLECTION = os.environ.get(
+    "MONGODB_DOCUMENT_STATUS_COLLECTION",
+    "document_status",
+)
 EMBEDDING_MODEL = os.environ.get("VERTEX_AI_EMBEDDING_MODEL", "text-embedding-005")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 GCP_REGION = os.environ.get("GCP_REGION", "europe-west1")
 
 mongo_client: MongoClient | None = None
 storage_client: storage.Client | None = None
+
+
+class PdfIngestionError(Exception):
+    """Expected user-actionable PDF ingestion failure."""
+
+    def __init__(self, error_code: str, user_message: str, technical_detail: str = ""):
+        super().__init__(technical_detail or user_message)
+        self.error_code = error_code
+        self.user_message = user_message
+        self.technical_detail = technical_detail or user_message
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +75,64 @@ def get_mongodb_collection():
     return db[MONGODB_COLLECTION]
 
 
+def get_document_status_collection():
+    """Return the MongoDB collection used for document ingestion status."""
+    client = get_mongo_client()
+    db = client[MONGODB_DB_NAME]
+    return db[MONGODB_DOCUMENT_STATUS_COLLECTION]
+
+
+def set_document_status(
+    source_name: str,
+    session_id: str,
+    status: str,
+    message: str,
+    *,
+    stage: str = "",
+    error_code: str = "",
+    error_detail: str = "",
+    chunk_count: int = 0,
+):
+    """Persist the latest ingestion status for one uploaded document."""
+    from datetime import datetime, timezone
+
+    if not source_name:
+        return
+
+    now = datetime.now(timezone.utc)
+    update = {
+        "$set": {
+            "object_name": source_name,
+            "source": source_name,
+            "session_id": session_id,
+            "status": status,
+            "message": message,
+            "stage": stage,
+            "error_code": error_code,
+            "error_detail": error_detail,
+            "chunk_count": int(chunk_count or 0),
+            "updated_at": now,
+        },
+        "$setOnInsert": {"created_at": now},
+    }
+    get_document_status_collection().update_one(
+        {"object_name": source_name, "session_id": session_id},
+        update,
+        upsert=True,
+    )
+
+
 def delete_vectors_for_source(source_name: str) -> int:
     """Delete all vectors belonging to one source file path/name."""
     collection = get_mongodb_collection()
     result = collection.delete_many({"source": source_name})
+    return result.deleted_count
+
+
+def delete_status_for_source(source_name: str) -> int:
+    """Delete ingestion status records belonging to one source file path/name."""
+    collection = get_document_status_collection()
+    result = collection.delete_many({"object_name": source_name})
     return result.deleted_count
 
 
@@ -126,13 +194,39 @@ def extract_and_chunk(pdf_path: str, source_name: str, session_id: str):
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     loader = PyPDFLoader(pdf_path)
-    pages = loader.load()
+    try:
+        pages = loader.load()
+    except Exception as exc:
+        raise PdfIngestionError(
+            "pdf_parse_error",
+            "SmartStudy could not read this PDF. The file may be corrupted, encrypted, or unsupported. Please try exporting it again as a standard text-based PDF.",
+            str(exc),
+        ) from exc
+
+    extracted_text = "\n".join((page.page_content or "").strip() for page in pages)
+    if not pages or not any(char.isalnum() for char in extracted_text):
+        raise PdfIngestionError(
+            "no_extractable_text",
+            "This PDF does not contain extractable text. It may be a scan or image-only PDF. Please upload a text-based PDF or run OCR on the file first.",
+            f"PyPDFLoader returned {len(pages)} page(s) with no alphanumeric text.",
+        )
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
     )
-    chunks = splitter.split_documents(pages)
+    chunks = [
+        chunk
+        for chunk in splitter.split_documents(pages)
+        if (chunk.page_content or "").strip()
+    ]
+
+    if not chunks:
+        raise PdfIngestionError(
+            "no_extractable_text",
+            "This PDF does not contain enough extractable text to index. Please upload a text-based PDF or run OCR on the file first.",
+            "Text splitter returned no non-empty chunks.",
+        )
 
     for chunk in chunks:
         chunk.metadata["source"] = source_name
@@ -222,16 +316,42 @@ def process_pdf(cloud_event):
             print(f"Skipping {blob_name}: object no longer exists in storage.")
             return
 
+        set_document_status(
+            blob_name,
+            session_id,
+            "processing",
+            "Ingestion started. Downloading the PDF from storage.",
+            stage="downloading",
+        )
         download_pdf_from_gcs(bucket_name, blob_name, tmp_path)
+        set_document_status(
+            blob_name,
+            session_id,
+            "processing",
+            "Reading PDF text and splitting it into study chunks.",
+            stage="parsing",
+        )
         chunks = extract_and_chunk(tmp_path, source_name=blob_name, session_id=session_id)
 
-        if not chunks:
-            print("No text extracted from PDF - skipping.")
-            return
-
+        set_document_status(
+            blob_name,
+            session_id,
+            "processing",
+            "Generating semantic embeddings for the extracted chunks.",
+            stage="embedding",
+            chunk_count=len(chunks),
+        )
         embeddings = generate_embeddings(chunks)
 
         # Idempotency per source object: replace any previous vectors for this path.
+        set_document_status(
+            blob_name,
+            session_id,
+            "processing",
+            "Saving indexed chunks to MongoDB.",
+            stage="upserting",
+            chunk_count=len(chunks),
+        )
         deleted_for_source = delete_vectors_for_source(blob_name)
         if deleted_for_source:
             print(f"Removed {deleted_for_source} old vectors for {blob_name}")
@@ -241,6 +361,14 @@ def process_pdf(cloud_event):
             return
 
         upsert_to_mongodb(chunks, embeddings)
+        set_document_status(
+            blob_name,
+            session_id,
+            "ready",
+            "Ingestion complete. Ready for chat.",
+            stage="ready",
+            chunk_count=len(chunks),
+        )
 
         # Safety net: remove stale vectors for files no longer in GCS.
         deleted_stale = reconcile_context_with_bucket(bucket_name)
@@ -248,7 +376,28 @@ def process_pdf(cloud_event):
             print(f"Reconciled {deleted_stale} stale vectors not present in GCS")
 
         print(f"Pipeline complete for {blob_name}")
+    except PdfIngestionError as exc:
+        set_document_status(
+            blob_name,
+            session_id,
+            "failed",
+            exc.user_message,
+            stage="failed",
+            error_code=exc.error_code,
+            error_detail=exc.technical_detail,
+        )
+        print(f"PDF ingestion failed for {blob_name}: {exc.error_code} - {exc}")
+        return
     except Exception as exc:
+        set_document_status(
+            blob_name,
+            session_id,
+            "failed",
+            "Ingestion failed while processing this PDF. Please try again later or upload a different text-based PDF.",
+            stage="failed",
+            error_code="ingestion_error",
+            error_detail=str(exc),
+        )
         print(f"Error processing {blob_name}: {exc}")
         raise
     finally:
@@ -281,4 +430,8 @@ def cleanup_deleted_pdf(cloud_event):
         return
 
     deleted_count = delete_vectors_for_source(blob_name)
-    print(f"Deleted {deleted_count} vectors for removed file: {blob_name}")
+    deleted_status_count = delete_status_for_source(blob_name)
+    print(
+        f"Deleted {deleted_count} vectors and {deleted_status_count} status records "
+        f"for removed file: {blob_name}"
+    )

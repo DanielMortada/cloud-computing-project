@@ -36,6 +36,10 @@ MONGODB_URI = os.environ.get("MONGODB_URI", "")
 MONGODB_DB_NAME = os.environ.get("MONGODB_DB_NAME", "smartstudy")
 MONGODB_COLLECTION = os.environ.get("MONGODB_COLLECTION", "context")
 MONGODB_CHAT_HISTORY_COLLECTION = os.environ.get("MONGODB_CHAT_HISTORY_COLLECTION", "chat_history")
+MONGODB_DOCUMENT_STATUS_COLLECTION = os.environ.get(
+    "MONGODB_DOCUMENT_STATUS_COLLECTION",
+    "document_status",
+)
 MONGODB_VECTOR_INDEX_NAME = os.environ.get("MONGODB_VECTOR_INDEX_NAME", "vector_index")
 EMBEDDING_MODEL = os.environ.get("VERTEX_AI_EMBEDDING_MODEL", "text-embedding-005")
 LLM_MODEL = os.environ.get("VERTEX_AI_LLM_MODEL", "gemini-2.5-flash")
@@ -45,6 +49,9 @@ GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "")
 GCS_UPLOAD_PREFIX = os.environ.get("GCS_UPLOAD_PREFIX", "uploads")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "25"))
 MIN_CONTEXT_SIMILARITY = float(os.environ.get("MIN_CONTEXT_SIMILARITY", "0.35"))
+DOCUMENT_PROCESSING_STALE_AFTER_SECONDS = int(
+    os.environ.get("DOCUMENT_PROCESSING_STALE_AFTER_SECONDS", "420")
+)
 PORT = int(os.environ.get("PORT", 8080))
 
 CONTENT_HASH_METADATA_KEY = "content_sha256"
@@ -621,6 +628,12 @@ def get_context_collection():
     return client[MONGODB_DB_NAME][MONGODB_COLLECTION]
 
 
+def get_document_status_collection():
+    """Return the MongoDB collection that stores async ingestion status."""
+    client = get_mongo_client()
+    return client[MONGODB_DB_NAME][MONGODB_DOCUMENT_STATUS_COLLECTION]
+
+
 def get_session_history(session_id: str) -> MongoDBChatMessageHistory:
     """Return a MongoDB-backed chat history for the given session."""
     return MongoDBChatMessageHistory(
@@ -733,6 +746,109 @@ def _document_source_filter(object_name: str, session_id: str | None = None) -> 
     return filter_doc
 
 
+def _document_status_filter(object_name: str, session_id: str | None = None) -> dict:
+    """Build a MongoDB filter matching one uploaded document status record."""
+    filter_doc = {"object_name": object_name}
+    if session_id:
+        filter_doc["session_id"] = session_id
+    return filter_doc
+
+
+def _status_time_to_iso(value) -> str | None:
+    """Return an ISO string for a stored datetime/status value."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _coerce_utc_datetime(value) -> datetime | None:
+    """Normalize MongoDB/GCS datetime values for status-age checks."""
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        raw_value = value.strip()
+        if not raw_value:
+            return None
+        if raw_value.endswith("Z"):
+            raw_value = f"{raw_value[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw_value)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _status_age_seconds(value, now: datetime) -> float | None:
+    """Return how old a status/object timestamp is in seconds."""
+    status_time = _coerce_utc_datetime(value)
+    if status_time is None:
+        return None
+    return max(0.0, (now - status_time).total_seconds())
+
+
+def _stale_processing_message(stage: str | None = None) -> str:
+    """Return the user-facing message for ingestion that stopped progressing."""
+    stage_note = f" while it was in the {stage} stage" if stage else ""
+    return (
+        f"Ingestion did not complete{stage_note} before the processing timeout. "
+        "This can happen with PDFs that mix text with heavy images, scans, or "
+        "unsupported embedded objects. Please try exporting a smaller text-based "
+        "PDF, flattening it, or running OCR before uploading again."
+    )
+
+
+def set_document_ingestion_status(
+    object_name: str,
+    session_id: str,
+    status: str,
+    message: str,
+    *,
+    stage: str = "",
+    error_code: str = "",
+    error_detail: str = "",
+    chunk_count: int = 0,
+):
+    """Create or update the async ingestion status for one uploaded document."""
+    now = datetime.now(timezone.utc)
+    get_document_status_collection().update_one(
+        _document_status_filter(object_name, session_id=session_id),
+        {
+            "$set": {
+                "object_name": object_name,
+                "source": object_name,
+                "session_id": session_id,
+                "status": status,
+                "message": message,
+                "stage": stage,
+                "error_code": error_code,
+                "error_detail": error_detail,
+                "chunk_count": int(chunk_count or 0),
+                "updated_at": now,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
+
+
+def get_stored_document_status(object_name: str, session_id: str | None = None) -> dict | None:
+    """Load the latest async ingestion status for one document, if present."""
+    return get_document_status_collection().find_one(
+        _document_status_filter(object_name, session_id=session_id),
+        {"_id": 0},
+    )
+
+
 def delete_vectors_for_source(object_name: str, session_id: str | None = None) -> int:
     """Delete all stored chunks for one uploaded document."""
     collection = get_context_collection()
@@ -740,13 +856,23 @@ def delete_vectors_for_source(object_name: str, session_id: str | None = None) -
     return result.deleted_count
 
 
+def delete_document_status(object_name: str, session_id: str | None = None) -> int:
+    """Delete ingestion status records for one uploaded document."""
+    result = get_document_status_collection().delete_many(
+        _document_status_filter(object_name, session_id=session_id)
+    )
+    return result.deleted_count
+
+
 def get_document_status(
     object_name: str,
     source_name: str | None = None,
     session_id: str | None = None,
+    object_updated_at=None,
 ) -> dict:
     """Return ingestion readiness for a previously uploaded PDF."""
-    checked_at = datetime.now(timezone.utc).isoformat()
+    checked_time = datetime.now(timezone.utc)
+    checked_at = checked_time.isoformat()
     clean_object_name = (object_name or "").strip()
     label = source_name or _display_source_name(clean_object_name)
 
@@ -778,26 +904,86 @@ def get_document_status(
     chunk_count = collection.count_documents(
         _document_source_filter(clean_object_name, session_id=session_id)
     )
+    stored_status = get_stored_document_status(clean_object_name, session_id=session_id)
 
     exists_in_storage = None
     if GCS_BUCKET_NAME:
         try:
             bucket = get_storage_client().bucket(GCS_BUCKET_NAME)
-            exists_in_storage = bucket.blob(clean_object_name).exists()
+            blob = bucket.blob(clean_object_name)
+            exists_in_storage = blob.exists()
+            if exists_in_storage and object_updated_at is None:
+                blob.reload()
+                object_updated_at = blob.updated
         except Exception as exc:
             print(f"Warning: could not verify storage status for {clean_object_name}: {exc}")
+
+    stage = (stored_status or {}).get("stage")
+    error_code = (stored_status or {}).get("error_code")
+    error_detail = (stored_status or {}).get("error_detail")
+    status_updated_at = _status_time_to_iso((stored_status or {}).get("updated_at"))
+    status_age = _status_age_seconds((stored_status or {}).get("updated_at"), checked_time)
+    object_age = _status_age_seconds(object_updated_at, checked_time)
+    processing_age = status_age if status_age is not None else object_age
 
     if chunk_count > 0:
         status = "ready"
         message = "Ingestion complete. Ready for chat."
+        stage = "ready"
+        error_code = ""
+        error_detail = ""
         ready = True
     elif exists_in_storage is False:
         status = "not_found"
         message = "File is not present in storage."
         ready = False
+    elif stored_status and stored_status.get("status") == "failed":
+        status = "failed"
+        message = (
+            stored_status.get("message")
+            or "Ingestion failed for this PDF. Please upload a text-based PDF and try again."
+        )
+        ready = False
+    elif (
+        exists_in_storage is True
+        and processing_age is not None
+        and processing_age >= DOCUMENT_PROCESSING_STALE_AFTER_SECONDS
+    ):
+        status = "failed"
+        message = _stale_processing_message(stage)
+        error_code = error_code or "ingestion_timeout"
+        error_detail = (
+            error_detail
+            or f"No chunks were indexed after {int(processing_age)} seconds."
+        )
+        ready = False
+
+        status_session_id = session_id or extract_session_id_from_object_name(clean_object_name)
+        if status_session_id:
+            try:
+                set_document_ingestion_status(
+                    clean_object_name,
+                    status_session_id,
+                    "failed",
+                    message,
+                    stage="failed",
+                    error_code=error_code,
+                    error_detail=error_detail,
+                    chunk_count=0,
+                )
+                stage = "failed"
+                status_updated_at = checked_at
+            except Exception as exc:
+                print(
+                    "Warning: could not persist stale ingestion failure "
+                    f"for {clean_object_name}: {exc}"
+                )
     else:
         status = "processing"
-        message = "Upload received. Waiting for ingestion to finish."
+        message = (
+            (stored_status or {}).get("message")
+            or "Upload received. Waiting for ingestion to finish."
+        )
         ready = False
 
     return {
@@ -808,6 +994,10 @@ def get_document_status(
         "chunk_count": chunk_count,
         "exists_in_storage": exists_in_storage,
         "checked_at": checked_at,
+        "stage": stage,
+        "error_code": error_code,
+        "error_detail": error_detail,
+        "status_updated_at": status_updated_at,
         "message": message,
     }
 
@@ -861,12 +1051,14 @@ def summarize_document_statuses(statuses: list[dict]) -> dict:
     processing_count = sum(1 for item in statuses if item["status"] == "processing")
     not_found_count = sum(1 for item in statuses if item["status"] == "not_found")
     invalid_count = sum(1 for item in statuses if item["status"] == "invalid")
+    failed_count = sum(1 for item in statuses if item["status"] == "failed")
     return {
         "total": len(statuses),
         "ready": ready_count,
         "processing": processing_count,
         "not_found": not_found_count,
         "invalid": invalid_count,
+        "failed": failed_count,
         "all_ready": ready_count == len(statuses) and len(statuses) > 0,
     }
 
@@ -888,6 +1080,7 @@ def list_session_documents(session_id: str) -> list[dict]:
                 object_name=blob.name,
                 source_name=_display_source_name(blob.name),
                 session_id=session_id,
+                object_updated_at=blob.updated,
             )
         )
 
@@ -916,12 +1109,14 @@ def delete_session_document(object_name: str, session_id: str) -> dict:
         raise RuntimeError(f"Storage delete failed: {exc}") from exc
 
     deleted_vectors = delete_vectors_for_source(clean_object_name, session_id=session_id)
+    deleted_status_records = delete_document_status(clean_object_name, session_id=session_id)
     return {
         "object_name": clean_object_name,
         "source_name": _display_source_name(clean_object_name),
         "session_id": session_id,
         "deleted_from_storage": existed_in_storage,
         "deleted_vectors": deleted_vectors,
+        "deleted_status_records": deleted_status_records,
     }
 
 
@@ -1082,6 +1277,10 @@ def upload():
                     "document_status": status["status"],
                     "ready": status["ready"],
                     "chunk_count": status["chunk_count"],
+                    "stage": status.get("stage"),
+                    "error_code": status.get("error_code"),
+                    "error_detail": status.get("error_detail"),
+                    "status_updated_at": status.get("status_updated_at"),
                     "replaced_count": len(replaced_documents),
                     "replaced_documents": replaced_documents,
                     "status_poll_path": "/documents/status",
@@ -1098,6 +1297,13 @@ def upload():
             DOCUMENT_TITLE_KEY_METADATA_KEY: document_title_key,
         }
         blob.upload_from_string(file_bytes, content_type="application/pdf")
+        set_document_ingestion_status(
+            object_name,
+            session_id,
+            "processing",
+            "PDF uploaded. Waiting for ingestion to start.",
+            stage="queued",
+        )
 
         replaced_documents = [
             delete_session_document(document["object_name"], session_id)
@@ -1127,6 +1333,10 @@ def upload():
                 "document_status": "processing",
                 "ready": False,
                 "chunk_count": 0,
+                "stage": "queued",
+                "error_code": "",
+                "error_detail": "",
+                "status_updated_at": datetime.now(timezone.utc).isoformat(),
                 "replaced_count": len(replaced_documents),
                 "replaced_documents": replaced_documents,
                 "status_poll_path": "/documents/status",
