@@ -189,6 +189,7 @@ def render_theme():
         }
         .ss-badge.ready  { background: var(--ss-green-bg); color: var(--ss-green); }
         .ss-badge.processing { background: var(--ss-accent-light); color: var(--ss-accent); }
+        .ss-badge.issue { background: var(--ss-red-bg); color: var(--ss-red); }
 
         /* ---- Tabs ---- */
         [data-testid="stTabs"] [data-baseweb="tab-list"] {
@@ -281,8 +282,10 @@ def render_theme():
         .ss-status-ready::before { background: var(--ss-green); }
         .ss-status-processing { background: var(--ss-accent-light); color: var(--ss-accent); }
         .ss-status-processing::before { background: var(--ss-accent); animation: ssPulse 1.6s infinite; }
+        .ss-status-failed,
         .ss-status-not_found,
         .ss-status-invalid  { background: var(--ss-red-bg); color: var(--ss-red); }
+        .ss-status-failed::before,
         .ss-status-not_found::before,
         .ss-status-invalid::before { background: var(--ss-red); }
         .ss-doc-name {
@@ -294,6 +297,95 @@ def render_theme():
         }
         .ss-doc-detail { margin: 0; color: var(--ss-muted); font-size: 0.85rem; line-height: 1.5; }
         .ss-doc-meta   { margin: 0.5rem 0 0 0; color: #9ca3af; font-size: 0.75rem; }
+
+        .ss-sidebar-docs {
+            margin: 0.75rem 0 1rem 0;
+            padding: 0.85rem;
+            border-radius: var(--ss-radius);
+            background: #f9fafb;
+            border: 1px solid var(--ss-border);
+        }
+        .ss-sidebar-docs-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.6rem;
+            margin-bottom: 0.65rem;
+        }
+        .ss-sidebar-docs-title {
+            margin: 0;
+            font-size: 0.86rem;
+            font-weight: 700;
+            color: var(--ss-ink);
+        }
+        .ss-sidebar-docs-counts {
+            margin: 0.15rem 0 0 0;
+            font-size: 0.72rem;
+            color: var(--ss-muted);
+            line-height: 1.4;
+        }
+        .ss-sidebar-doc-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.55rem;
+            max-height: 16rem;
+            overflow-y: auto;
+            padding-right: 0.1rem;
+        }
+        .ss-sidebar-doc-card {
+            padding: 0.65rem;
+            border-radius: calc(var(--ss-radius) - 4px);
+            background: var(--ss-card);
+            border: 1px solid var(--ss-border);
+        }
+        .ss-sidebar-doc-card.ready { border-left: 3px solid var(--ss-green); }
+        .ss-sidebar-doc-card.processing { border-left: 3px solid var(--ss-accent); }
+        .ss-sidebar-doc-card.failed,
+        .ss-sidebar-doc-card.not_found,
+        .ss-sidebar-doc-card.invalid { border-left: 3px solid var(--ss-red); }
+        .ss-sidebar-doc-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+        }
+        .ss-sidebar-doc-name {
+            min-width: 0;
+            margin: 0;
+            font-size: 0.78rem;
+            font-weight: 650;
+            color: var(--ss-ink);
+            line-height: 1.35;
+            word-break: break-word;
+        }
+        .ss-sidebar-doc-pill {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.18rem 0.42rem;
+            border-radius: 999px;
+            font-size: 0.65rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .ss-sidebar-doc-pill.ready { background: var(--ss-green-bg); color: var(--ss-green); }
+        .ss-sidebar-doc-pill.processing { background: var(--ss-accent-light); color: var(--ss-accent); }
+        .ss-sidebar-doc-pill.failed,
+        .ss-sidebar-doc-pill.not_found,
+        .ss-sidebar-doc-pill.invalid { background: var(--ss-red-bg); color: var(--ss-red); }
+        .ss-sidebar-doc-message {
+            margin: 0.35rem 0 0 0;
+            color: var(--ss-muted);
+            font-size: 0.72rem;
+            line-height: 1.4;
+        }
+        .ss-sidebar-doc-meta {
+            margin: 0.3rem 0 0 0;
+            color: #9ca3af;
+            font-size: 0.66rem;
+            line-height: 1.35;
+        }
 
         /* ---- Empty state ---- */
         .ss-empty-state {
@@ -445,6 +537,10 @@ def normalize_document_payload(item: dict) -> dict | None:
         "status": item.get("status", "processing"),
         "ready": bool(item.get("ready", False)),
         "chunk_count": item.get("chunk_count", 0),
+        "stage": item.get("stage"),
+        "error_code": item.get("error_code"),
+        "error_detail": item.get("error_detail"),
+        "status_updated_at": item.get("status_updated_at"),
         "message": item.get(
             "message",
             "Upload complete. Waiting for ingestion to finish.",
@@ -466,6 +562,7 @@ def document_state_signature(documents: list[dict]) -> tuple:
                 str(document.get("status", "")),
                 bool(document.get("ready", False)),
                 int(document.get("chunk_count", 0) or 0),
+                str(document.get("message", "")),
             )
         )
     return tuple(sorted(normalized_documents))
@@ -501,6 +598,11 @@ def refresh_session_documents() -> bool:
     except requests.exceptions.ConnectionError:
         st.session_state.document_status_error = (
             "Cannot reach the Chat API documents endpoint right now."
+        )
+        st.session_state.documents_hydrated = False
+    except requests.exceptions.Timeout:
+        st.session_state.document_status_error = (
+            "The Chat API documents endpoint took too long to respond. Please refresh in a moment."
         )
         st.session_state.documents_hydrated = False
     except Exception as exc:
@@ -545,6 +647,11 @@ def hydrate_chat_history_once():
     except requests.exceptions.ConnectionError:
         st.session_state.history_error = (
             "Cannot reach the Chat API history endpoint right now."
+        )
+        st.session_state.history_hydrated = False
+    except requests.exceptions.Timeout:
+        st.session_state.history_error = (
+            "The Chat API history endpoint took too long to respond. Please refresh in a moment."
         )
         st.session_state.history_hydrated = False
     except Exception as exc:
@@ -592,7 +699,7 @@ def summarize_documents() -> dict:
     issues = sum(
         1
         for doc in documents
-        if doc.get("status") in {"not_found", "invalid"}
+        if doc.get("status") in {"failed", "not_found", "invalid"}
     )
     return {
         "total": total,
@@ -608,6 +715,37 @@ def has_pending_documents() -> bool:
         doc.get("status") == "processing"
         for doc in st.session_state.uploaded_documents
     )
+
+
+def document_status_class(document: dict) -> str:
+    """Return a safe CSS/status key for a document state."""
+    status = str(document.get("status", "processing")).strip().lower()
+    if status in {"ready", "processing", "failed", "not_found", "invalid"}:
+        return status
+    return "processing"
+
+
+def document_status_label(document: dict) -> str:
+    """Return the short label used by document status cards."""
+    return {
+        "ready": "Ready",
+        "processing": "Ingesting",
+        "failed": "Issue",
+        "not_found": "Missing",
+        "invalid": "Invalid",
+    }.get(document_status_class(document), "Checking")
+
+
+def document_meta_bits(document: dict, *, include_checked_at: bool = True) -> list[str]:
+    """Build compact metadata fragments shared by main and sidebar cards."""
+    meta_bits = []
+    if document.get("chunk_count"):
+        meta_bits.append(f'{document["chunk_count"]} indexed chunks')
+    if document.get("error_code"):
+        meta_bits.append(f'issue: {document["error_code"]}')
+    if include_checked_at and document.get("checked_at"):
+        meta_bits.append(f'checked {document["checked_at"]}')
+    return meta_bits
 
 
 def upload_selected_pdfs(uploaded_files) -> tuple[list[dict], list[str]]:
@@ -654,6 +792,10 @@ def upload_selected_pdfs(uploaded_files) -> tuple[list[dict], list[str]]:
                         "status": data.get("document_status", "processing"),
                         "ready": bool(data.get("ready", False)),
                         "chunk_count": data.get("chunk_count", 0),
+                        "stage": data.get("stage"),
+                        "error_code": data.get("error_code"),
+                        "error_detail": data.get("error_detail"),
+                        "status_updated_at": data.get("status_updated_at"),
                         "upload_action": data.get("upload_action", "uploaded"),
                         "replaced_count": data.get("replaced_count", 0),
                         "content_sha256": data.get("content_sha256"),
@@ -673,6 +815,11 @@ def upload_selected_pdfs(uploaded_files) -> tuple[list[dict], list[str]]:
                     errors.append(f"{uploaded_pdf.name}: {error_message}")
         except requests.exceptions.ConnectionError:
             errors.append(f"{uploaded_pdf.name}: cannot reach the Chat API upload endpoint.")
+        except requests.exceptions.Timeout:
+            errors.append(
+                f"{uploaded_pdf.name}: upload timed out after {UPLOAD_TIMEOUT_SECONDS} seconds. "
+                "Please try again with a smaller PDF or retry when the backend is responsive."
+            )
         except Exception as exc:
             errors.append(f"{uploaded_pdf.name}: {exc}")
 
@@ -757,6 +904,10 @@ def delete_document_from_session(document: dict) -> bool:
         st.session_state.document_status_error = (
             "Cannot reach the Chat API delete endpoint right now."
         )
+    except requests.exceptions.Timeout:
+        st.session_state.document_status_error = (
+            "The Chat API delete endpoint took too long to respond. Please refresh and try again."
+        )
     except Exception as exc:
         st.session_state.document_status_error = f"Delete error: {exc}"
 
@@ -765,21 +916,16 @@ def delete_document_from_session(document: dict) -> bool:
 
 def build_document_card(document: dict) -> str:
     """Return a styled HTML card for one uploaded PDF."""
-    status = document.get("status", "processing")
+    status = document_status_class(document)
     status_label = {
         "ready": "Ready for chat",
         "processing": "Ingesting",
+        "failed": "Needs attention",
         "not_found": "Missing",
         "invalid": "Invalid",
     }.get(status, "Checking")
-
     detail = document.get("message") or "Waiting for the latest ingestion status."
-    meta_bits = []
-    if document.get("chunk_count"):
-        meta_bits.append(f'{document["chunk_count"]} indexed chunks')
-    if document.get("checked_at"):
-        meta_bits.append(f'checked {html.escape(str(document["checked_at"]))}')
-
+    meta_bits = document_meta_bits(document)
     meta_text = " | ".join(meta_bits) if meta_bits else "Awaiting status refresh."
 
     return dedent(
@@ -792,6 +938,68 @@ def build_document_card(document: dict) -> str:
         </article>
         """
     ).strip()
+
+
+def build_sidebar_document_card(document: dict) -> str:
+    """Return a compact sidebar card synchronized with the Documents tab state."""
+    status = document_status_class(document)
+    detail = document.get("message") or "Waiting for the latest ingestion status."
+    meta_bits = document_meta_bits(document, include_checked_at=False)
+    meta_text = " | ".join(meta_bits)
+
+    meta_html = (
+        f'<p class="ss-sidebar-doc-meta">{html.escape(meta_text)}</p>'
+        if meta_text
+        else ""
+    )
+
+    return dedent(
+        f"""
+        <article class="ss-sidebar-doc-card {html.escape(status)}">
+            <div class="ss-sidebar-doc-row">
+                <p class="ss-sidebar-doc-name">{html.escape(document.get("source_name", "Untitled PDF"))}</p>
+                <span class="ss-sidebar-doc-pill {html.escape(status)}">{html.escape(document_status_label(document))}</span>
+            </div>
+            <p class="ss-sidebar-doc-message">{html.escape(detail)}</p>
+            {meta_html}
+        </article>
+        """
+    ).strip()
+
+
+def build_sidebar_document_status_panel() -> str:
+    """Return the sidebar document readiness panel."""
+    documents = st.session_state.uploaded_documents
+    summary = summarize_documents()
+    cards = "\n".join(build_sidebar_document_card(document) for document in documents)
+    counts = (
+        f'{summary["ready"]} ready, '
+        f'{summary["processing"]} processing, '
+        f'{summary["issues"]} issues'
+    )
+
+    return dedent(
+        f"""
+        <section class="ss-sidebar-docs">
+            <div class="ss-sidebar-docs-head">
+                <div>
+                    <p class="ss-sidebar-docs-title">Document readiness</p>
+                    <p class="ss-sidebar-docs-counts">{html.escape(counts)}</p>
+                </div>
+            </div>
+            <div class="ss-sidebar-doc-list">
+                {cards}
+            </div>
+        </section>
+        """
+    ).strip()
+
+
+def render_sidebar_document_status_panel():
+    """Render compact document statuses in the sidebar while users chat."""
+    if not st.session_state.uploaded_documents:
+        return
+    st.markdown(build_sidebar_document_status_panel(), unsafe_allow_html=True)
 
 
 def render_document_status_panel():
@@ -897,6 +1105,10 @@ def render_sidebar():
             badges.append(
                 f'<span class="ss-badge processing">⏳ {summary["processing"]} processing</span>'
             )
+        if summary["issues"] > 0:
+            badges.append(
+                f'<span class="ss-badge issue">! {summary["issues"]} issues</span>'
+            )
 
         st.markdown(
             """
@@ -966,12 +1178,14 @@ def render_sidebar():
 
         feedback = st.session_state.upload_feedback
         if feedback:
-            if feedback["kind"] == "success":
+            if feedback["kind"] == "success" and not st.session_state.uploaded_documents:
                 st.success(feedback["message"])
             elif feedback["kind"] == "warning":
                 st.warning(feedback["message"])
-            else:
+            elif feedback["kind"] == "error":
                 st.error(feedback["message"])
+
+        render_sidebar_document_status_panel()
 
         st.divider()
 
@@ -1103,6 +1317,9 @@ def handle_chat_input(chat_container=None):
                                     st.markdown(f"- {src}")
                     except requests.exceptions.ConnectionError:
                         answer = "Cannot reach the Chat API. Is the backend running?"
+                        st.error(answer)
+                    except requests.exceptions.Timeout:
+                        answer = "The Chat API took too long to answer. Please try again in a moment."
                         st.error(answer)
                     except Exception as exc:
                         answer = f"Error: {exc}"
