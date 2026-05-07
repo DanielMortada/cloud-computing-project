@@ -158,6 +158,10 @@ session_id = extract_session_id_from_object_name(blob_name)
 chunks = extract_and_chunk(tmp_path, source_name=blob_name, session_id=session_id)
 ```
 
+The function also validates that parsing actually produced usable text. If `PyPDFLoader` cannot read the PDF, or if the pages contain no extractable alphanumeric text, ingestion is marked as `failed` in MongoDB `document_status` with a user-facing message. This catches scanned/image-only PDFs and corrupted or encrypted PDFs.
+
+If parsing or embedding is killed by the Cloud Function timeout before Python can run the failure handler, the Chat API detects the stale `processing` status during document polling and reports a timeout-style failure instead of leaving the UI stuck on "Ingesting".
+
 **6. Generate embeddings**
 
 Each text chunk is sent to **Vertex AI's `text-embedding-005`** model, which returns a 768-dimensional vector — a numerical fingerprint of the chunk's semantic meaning. We batch these in groups of 250 to respect API limits:
@@ -273,6 +277,8 @@ Each chunk inserted into the `context` collection has a clean five-field structu
 
 This flat layout keeps ingestion and retrieval simple. The Chat API filters chunks by `session_id`, cites them by `source` + `page`, and status/delete/reconcile operations still use `source` as the canonical object-path field.
 
+The function also writes one document-level status record to MongoDB `document_status`. This record tracks `processing`, `ready`, or `failed`, the current stage, chunk count, and any parse error message that should be shown in the UI. The Chat API supervises this record and classifies it as failed if it remains stale beyond `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS`.
+
 ---
 
 ## Deployment Configuration
@@ -288,6 +294,8 @@ Trigger:      Eventarc → GCS bucket events
 ```
 
 The function has no Dockerfile — Google provides the runtime. We just supply `main.py` and `requirements.txt`, and the Functions Framework handles the HTTP-to-CloudEvent translation.
+
+Both functions need access to MongoDB `context` and `document_status`: ingestion writes progress/failure states, and cleanup removes stale status records when a PDF is deleted.
 
 The Eventarc trigger is created by the deployment command, not by Python code. The key deployment filters are:
 

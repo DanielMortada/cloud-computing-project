@@ -235,9 +235,11 @@ stateDiagram-v2
     Selected --> Uploading: Click "Upload"
     Uploading --> Processing: API confirms upload
     Processing --> Ready: Chunks appear in MongoDB
+    Processing --> Failed: Parser reports no extractable text
     Processing --> Processing: Status poll (every 4s)
     Processing --> NotFound: File missing from GCS
     Ready --> [*]: Ready for chat
+    Failed --> [*]: User uploads another PDF
 ```
 
 ### Automatic Status Polling with Fragments
@@ -253,6 +255,10 @@ def document_status_fragment():
 ```
 
 The UI compares a stable document-state signature and only triggers a full app rerun when a meaningful status change happens. That keeps the sidebar badges, chat welcome subtitle, and Documents tab in sync without constant unnecessary reruns.
+
+If the backend returns a document as `failed`, the status card stops polling for that file and shows the failure message returned by the API. That failure can come directly from the ingestion function, for example a scanned/image-only PDF with no extractable text, or from the Chat API's stale-processing timeout when a mixed PDF stops progressing and no chunks are indexed.
+
+The sidebar renders a compact readiness panel from the same `uploaded_documents` state used by the Documents tab. This keeps the latest ready/processing/failed state visible while the student is chatting, so the previous upload success message does not become the only signal after a document later fails.
 
 ### Document Deletion
 
@@ -351,6 +357,7 @@ Streamlit's default appearance is functional but generic. The app injects custom
 
 - **CSS custom properties** (`--ss-accent`, `--ss-border`, etc.) for consistent theming
 - **Document status cards** with animated pulse indicators for processing state
+- **Sidebar readiness cards** mirroring the Documents tab while the user chats
 - **Chat message styling** with rounded corners and subtle shadows
 - **Responsive grid** for document cards that adapts to screen width
 - **Rise animation** for newly appearing elements

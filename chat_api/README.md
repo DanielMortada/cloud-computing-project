@@ -323,6 +323,8 @@ blob.upload_from_string(file_bytes, content_type="application/pdf")
 
 The UI calls this endpoint on page load to rebuild the Documents tab after a refresh or reopen, and reuses it for periodic live sync while files are still processing. The API lists objects only from the active session folder and returns their latest status summary.
 
+Readiness is based on four signals: whether the GCS object still exists, how many chunks exist in MongoDB `context`, the latest async ingestion record in MongoDB `document_status`, and whether that status has gone stale. That lets the API return `failed` with a user-facing explanation when the Cloud Function detects a corrupted/image-only PDF, or when ingestion stops progressing because parsing or embedding was killed by a timeout.
+
 ### `DELETE /documents` - Session document removal
 
 The UI calls this endpoint when the user deletes a document card. The API validates that the `object_name` belongs to the active `session_id`, deletes the PDF from GCS, and immediately removes indexed chunks for that same `(source, session_id)` pair.
@@ -334,9 +336,13 @@ After uploading, the UI needs to know when ingestion is complete. This endpoint 
 ```python
 chunk_count = collection.count_documents({"source": object_name})
 # chunk_count > 0 → "ready"
+# document_status.status == "failed" → "failed"
+# stale processing age >= DOCUMENT_PROCESSING_STALE_AFTER_SECONDS → "failed"
 # chunk_count == 0 and file exists in GCS → "processing"
 # chunk_count == 0 and file not in GCS → "not_found"
 ```
+
+`DOCUMENT_PROCESSING_STALE_AFTER_SECONDS` defaults to `420`, slightly above the deployed Cloud Function timeout of `300s`. This prevents mixed PDFs with heavy images or unusual embedded objects from staying on "Ingesting" forever if the worker is terminated before it can write its own failure record.
 
 ### `GET /history` and `DELETE /history` — Session management
 
@@ -416,7 +422,10 @@ Environment variables are set at deploy time and include:
 - MongoDB connection string and collection names
 - GCP project ID and region
 - GCS bucket name and upload prefix
+- `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS` for stalled-ingestion classification
 - Vertex AI model identifiers
+
+The MongoDB collections used by the API are `context`, `chat_history`, and `document_status`. The last one stores async ingestion progress, Cloud Function failure messages, and Chat API timeout/stale-ingestion failures.
 
 The exact active conventions, deployment command, and verification commands live in the developer runbook rather than being duplicated here.
 

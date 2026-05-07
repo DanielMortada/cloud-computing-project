@@ -107,7 +107,7 @@ gcloud functions deploy smartstudy-ingest \
   --entry-point=process_pdf \
   --trigger-event-filters="type=google.cloud.storage.object.v1.finalized" \
   --trigger-event-filters="bucket=YOUR_BUCKET_NAME" \
-  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005" \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,MONGODB_DOCUMENT_STATUS_COLLECTION=document_status,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005" \
   --memory=1Gi \
   --timeout=300s
 ```
@@ -123,7 +123,7 @@ gcloud functions deploy smartstudy-cleanup \
   --entry-point=cleanup_deleted_pdf \
   --trigger-event-filters="type=google.cloud.storage.object.v1.deleted" \
   --trigger-event-filters="bucket=YOUR_BUCKET_NAME" \
-  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,MONGODB_DOCUMENT_STATUS_COLLECTION=document_status,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME" \
   --memory=1Gi \
   --timeout=300s
 
@@ -139,7 +139,7 @@ gcloud run deploy smartstudy-chat-api \
   --source=. \
   --region=europe-west1 \
   --allow-unauthenticated \
-  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,MONGODB_CHAT_HISTORY_COLLECTION=chat_history,MONGODB_VECTOR_INDEX_NAME=vector_index,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005,VERTEX_AI_LLM_MODEL=gemini-2.5-flash" \
+  --set-env-vars="MONGODB_URI=...,MONGODB_DB_NAME=smartstudy,MONGODB_COLLECTION=context,MONGODB_CHAT_HISTORY_COLLECTION=chat_history,MONGODB_DOCUMENT_STATUS_COLLECTION=document_status,MONGODB_VECTOR_INDEX_NAME=vector_index,GCP_PROJECT_ID=...,GCP_REGION=europe-west1,GCS_BUCKET_NAME=YOUR_BUCKET_NAME,DOCUMENT_PROCESSING_STALE_AFTER_SECONDS=420,VERTEX_AI_EMBEDDING_MODEL=text-embedding-005,VERTEX_AI_LLM_MODEL=gemini-2.5-flash" \
   --memory=1Gi
 
 cd ..
@@ -217,6 +217,7 @@ Create a database named `smartstudy` with these collections:
 
 - `context` for PDF chunks and embeddings
 - `chat_history` for conversation state
+- `document_status` for asynchronous ingestion progress, user-facing parse failure details, and stale-ingestion timeout classification
 
 Create a vector search index named `vector_index` on the `context` collection. The current embedding dimension is `768` and similarity is `cosine`.
 
@@ -227,6 +228,8 @@ Create a vector search index named `vector_index` on the `context` collection. T
 - Uploads are deduplicated per session with SHA-256 content hashes. Re-uploading identical bytes reuses the existing object, even under a different filename.
 - Re-uploading the same normalized filename with different content creates a new version and removes the previous same-title object and vectors.
 - Ingestion is event-driven and reproducible: a finalized object in GCS is what starts PDF processing.
+- Image-only, scanned, corrupted, or otherwise unreadable PDFs are marked as failed in `document_status` and shown in the UI with an actionable message instead of staying stuck as processing.
+- If a PDF with mixed text/images or unusual embedded objects makes ingestion stall until the worker timeout, the Chat API marks it failed after `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS` instead of showing "Ingesting" forever.
 - Cleanup is also event-driven: deleting a PDF from GCS removes its stored vectors.
 - The UI can remove one session-scoped PDF at a time through the Documents tab, which calls `DELETE /documents`.
 - Chat memory is persisted in MongoDB and restored on refresh or reopen using session-aware history hydration (`sid` + `GET /history`).
