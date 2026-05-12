@@ -419,16 +419,6 @@ def cleanup_deleted_pdf(cloud_event):
         print(f"Skipping non-PDF deletion event: {blob_name}")
         return
 
-    # Overwrite operations can emit delete events for older generations.
-    # If the same object path still exists, do not remove vectors.
-    bucket = get_storage_client().bucket(bucket_name)
-    if bucket.blob(blob_name).exists():
-        print(
-            f"Skipping cleanup for {blob_name}: object path still exists "
-            "(likely generation replacement)."
-        )
-        return
-
     deleted_count = delete_vectors_for_source(blob_name)
     deleted_status_count = delete_status_for_source(blob_name)
     print(

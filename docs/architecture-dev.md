@@ -120,7 +120,7 @@ flowchart TD
     API -->|D4. Delete GCS object only| GCS
     API -->|D5. Refresh document list| UI
     GCS -->|D6. Delete event| CLEAN[Cloud Function Gen2<br/>smartstudy-cleanup]
-    CLEAN -->|D7. Ignore non-PDF or overwrite race| GCS
+    CLEAN -->|D7. Ignore non-PDF events| CLEAN
     CLEAN -->|D8a. Delete vectors by source| CTX
     CLEAN -->|D8b. Delete status by source| STATUS
 
@@ -220,8 +220,8 @@ D3. The Chat API validates that the requested object path belongs to the active 
 D4. The Chat API deletes only the matching object from GCS. It does not delete MongoDB vectors or `document_status` records.
 D5. The UI refreshes `GET /documents` and removes the card from the current session view because GCS is the document source of truth.
 D6. GCS emits a `google.cloud.storage.object.v1.deleted` event.
-D7. `smartstudy-cleanup` ignores non-PDF events and skips cleanup if the same object path still exists, which protects generation-replacement races.
-D8. If the object is truly gone, `smartstudy-cleanup` deletes vectors and status records where `source` or `object_name` matches the deleted blob path. This also covers PDFs deleted directly from GCS rather than through the UI.
+D7. `smartstudy-cleanup` ignores non-PDF deletion events.
+D8. For PDF deletions, `smartstudy-cleanup` deletes vectors and status records where `source` or `object_name` matches the deleted blob path. This also covers PDFs deleted directly from GCS rather than through the UI. Since all UI uploads route through the Chat API and always land on a fresh `uploads/<sid>/<name>-<uuid8>.pdf` path, cleanup never collides with an in-flight ingest on the same path.
 
 This division is intentional: the Chat API transmits the user's deletion intent by mutating GCS, while the cleanup Cloud Function is the only component that mutates MongoDB for document deletion.
 

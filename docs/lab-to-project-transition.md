@@ -187,7 +187,6 @@ We added:
 - idempotent ingestion: delete old vectors for the same object before inserting fresh ones;
 - object-existence guards: avoid processing or upserting vectors for PDFs deleted during ingestion;
 - cleanup function: remove vectors when GCS emits an object deletion event;
-- overwrite-race guard: skip cleanup if the same object path still exists after a delete event;
 - reconciliation scan: remove stale MongoDB vectors for PDFs no longer present in GCS.
 
 These changes are not extra decoration. They are what keep GCS and MongoDB aligned in an event-driven system.

@@ -203,14 +203,14 @@ flowchart TD
     A["🗑️ PDF deleted from GCS bucket"]
     B["📨 GCS emits <b>object.deleted</b> event"]
     C["⚡ <b>cleanup_deleted_pdf</b> function triggered"]
-    D{"Does the same object<br/>path still exist?"}
-    E["⏭️ Skip — this was an overwrite,<br/>not a true deletion"]
-    F["🗑️ Delete all vectors matching<br/>this source from MongoDB"]
+    D{"Is the deleted object<br/>a PDF?"}
+    E["⏭️ Skip — non-PDF event"]
+    F["🗑️ Delete all vectors and status<br/>records for this source from MongoDB"]
     G["✅ Cleanup complete"]
 
     A --> B --> C --> D
-    D -->|"Yes (generation replacement)"| E
-    D -->|"No (truly deleted)"| F --> G
+    D -->|"No"| E
+    D -->|"Yes"| F --> G
 
     style A fill:#FCE8E6,stroke:#EA4335,color:#C5221F
     style B fill:#FEF7E0,stroke:#FBBC05,color:#EA8600
@@ -218,17 +218,9 @@ flowchart TD
     style F fill:#E6F4EA,stroke:#34A853,color:#188038
 ```
 
-### The overwrite-race guard
+### Why the cleanup path is unconditional
 
-When you _overwrite_ a file in GCS (upload a new version with the same name), GCS emits **both** a `deleted` event for the old generation **and** a `finalized` event for the new one. Without a guard, the cleanup function could delete vectors that the ingestion function is about to recreate — a race condition.
-
-Our guard checks whether the object path still exists before deleting vectors:
-
-```python
-if bucket.blob(blob_name).exists():
-    print("Skipping cleanup: object path still exists (likely generation replacement).")
-    return
-```
+Every PDF upload in SmartStudy routes through the Chat API, which always writes new content to a fresh `uploads/<sid>/<name>-<uuid8>.pdf` path (a freshly generated 8-char suffix per upload). Same-title-but-different-content uploads delete the old path and write the new one at a different path — never at the same GCS object name. So an `object.deleted` event always means a real deletion, and `cleanup_deleted_pdf` can remove vectors unconditionally without worrying about colliding with an in-flight ingestion.
 
 ---
 
