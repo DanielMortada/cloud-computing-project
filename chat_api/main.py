@@ -3,7 +3,7 @@ SmartStudy — Chat API
 ======================
 Flask service that handles the RAG chat loop:
   • Receives a user question
-  • Retrieves relevant document chunks from MongoDB Atlas Vector Search
+  • Retrieves relevant document chunks from MongoDB Atlas
   • Sends context + question + chat history to Gemini 2.5 Flash
   • Returns the tutor's response
 
@@ -286,6 +286,20 @@ def list_session_document_records(session_id: str) -> list[dict]:
     return records
 
 
+def list_active_session_pdf_sources(session_id: str) -> list[str]:
+    """List active session PDF object paths from GCS, the document source of truth."""
+    if not session_id or not GCS_BUCKET_NAME:
+        return []
+
+    bucket = get_storage_client().bucket(GCS_BUCKET_NAME)
+    prefix = f"{build_session_upload_prefix(session_id).rstrip('/')}/"
+    return [
+        blob.name
+        for blob in bucket.list_blobs(prefix=prefix)
+        if blob.name and blob.name.lower().endswith(".pdf")
+    ]
+
+
 def _normalize_prompt_for_match(question: str) -> str:
     """Normalize a user prompt for simple intent classification."""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", question.lower())).strip()
@@ -396,19 +410,19 @@ def _is_quiz_command(question: str) -> bool:
     return question.strip().lower() == "/quiz"
 
 
-def _sample_quiz_records(session_id: str, sample_size: int = 10) -> list[dict]:
+def _sample_quiz_records(
+    session_id: str,
+    source_names: list[str],
+    sample_size: int = 10,
+) -> list[dict]:
     """Fetch a small random sample of indexed chunks for quiz generation."""
+    if not source_names:
+        return []
+
     collection = get_context_collection()
     pipeline = [
         {
-            "$match": {
-                "session_id": session_id,
-                "textChunk": {
-                    "$exists": True,
-                    "$type": "string",
-                    "$ne": "",
-                }
-            }
+            "$match": _session_chunk_filter(session_id, source_names=source_names)
         },
         {"$sample": {"size": sample_size}},
     ]
@@ -517,13 +531,16 @@ def get_embeddings_model() -> VertexAIEmbeddings:
     return embeddings_model
 
 
-def _session_chunk_filter(session_id: str) -> dict:
+def _session_chunk_filter(session_id: str, source_names: list[str] | None = None) -> dict:
     """Return a MongoDB filter matching indexed chunks for one session."""
-    return {
+    filter_doc = {
         "session_id": session_id,
         "textChunk": {"$exists": True, "$type": "string", "$ne": ""},
         "vectorEmbedding": {"$exists": True, "$type": "array"},
     }
+    if source_names is not None:
+        filter_doc["source"] = {"$in": source_names}
+    return filter_doc
 
 
 def _cosine_similarity(query_vector: list[float], candidate_vector) -> float:
@@ -551,13 +568,17 @@ def _cosine_similarity(query_vector: list[float], candidate_vector) -> float:
 def _rank_session_records_by_similarity(
     question: str,
     session_id: str,
+    source_names: list[str],
     limit: int = 5,
 ) -> list[dict]:
     """Rank one session's stored chunk vectors against the current question."""
+    if not source_names:
+        return []
+
     collection = get_context_collection()
     records = list(
         collection.find(
-            _session_chunk_filter(session_id),
+            _session_chunk_filter(session_id, source_names=source_names),
             {
                 "_id": 0,
                 "textChunk": 1,
@@ -596,11 +617,26 @@ def _rank_session_records_by_similarity(
 
 def retrieve_context_for_question(question: str, session_id: str) -> tuple[str, list[str]]:
     """Retrieve session-scoped context for standard chat and quiz mode."""
+    try:
+        active_sources = list_active_session_pdf_sources(session_id)
+    except Exception as exc:
+        print(f"Warning: could not list active GCS sources for retrieval: {exc}")
+        return "", []
+
     if _is_quiz_command(question):
-        sampled_records = _sample_quiz_records(session_id=session_id, sample_size=10)
+        sampled_records = _sample_quiz_records(
+            session_id=session_id,
+            source_names=active_sources,
+            sample_size=10,
+        )
         return _build_context_and_sources(sampled_records)
 
-    ranked_records = _rank_session_records_by_similarity(question, session_id, limit=5)
+    ranked_records = _rank_session_records_by_similarity(
+        question,
+        session_id,
+        source_names=active_sources,
+        limit=5,
+    )
     return _build_context_and_sources(ranked_records)
 
 
@@ -807,61 +843,12 @@ def _stale_processing_message(stage: str | None = None) -> str:
     )
 
 
-def set_document_ingestion_status(
-    object_name: str,
-    session_id: str,
-    status: str,
-    message: str,
-    *,
-    stage: str = "",
-    error_code: str = "",
-    error_detail: str = "",
-    chunk_count: int = 0,
-):
-    """Create or update the async ingestion status for one uploaded document."""
-    now = datetime.now(timezone.utc)
-    get_document_status_collection().update_one(
-        _document_status_filter(object_name, session_id=session_id),
-        {
-            "$set": {
-                "object_name": object_name,
-                "source": object_name,
-                "session_id": session_id,
-                "status": status,
-                "message": message,
-                "stage": stage,
-                "error_code": error_code,
-                "error_detail": error_detail,
-                "chunk_count": int(chunk_count or 0),
-                "updated_at": now,
-            },
-            "$setOnInsert": {"created_at": now},
-        },
-        upsert=True,
-    )
-
-
 def get_stored_document_status(object_name: str, session_id: str | None = None) -> dict | None:
     """Load the latest async ingestion status for one document, if present."""
     return get_document_status_collection().find_one(
         _document_status_filter(object_name, session_id=session_id),
         {"_id": 0},
     )
-
-
-def delete_vectors_for_source(object_name: str, session_id: str | None = None) -> int:
-    """Delete all stored chunks for one uploaded document."""
-    collection = get_context_collection()
-    result = collection.delete_many(_document_source_filter(object_name, session_id=session_id))
-    return result.deleted_count
-
-
-def delete_document_status(object_name: str, session_id: str | None = None) -> int:
-    """Delete ingestion status records for one uploaded document."""
-    result = get_document_status_collection().delete_many(
-        _document_status_filter(object_name, session_id=session_id)
-    )
-    return result.deleted_count
 
 
 def get_document_status(
@@ -951,33 +938,13 @@ def get_document_status(
     ):
         status = "failed"
         message = _stale_processing_message(stage)
+        stage = "failed"
         error_code = error_code or "ingestion_timeout"
         error_detail = (
             error_detail
             or f"No chunks were indexed after {int(processing_age)} seconds."
         )
         ready = False
-
-        status_session_id = session_id or extract_session_id_from_object_name(clean_object_name)
-        if status_session_id:
-            try:
-                set_document_ingestion_status(
-                    clean_object_name,
-                    status_session_id,
-                    "failed",
-                    message,
-                    stage="failed",
-                    error_code=error_code,
-                    error_detail=error_detail,
-                    chunk_count=0,
-                )
-                stage = "failed"
-                status_updated_at = checked_at
-            except Exception as exc:
-                print(
-                    "Warning: could not persist stale ingestion failure "
-                    f"for {clean_object_name}: {exc}"
-                )
     else:
         status = "processing"
         message = (
@@ -1089,7 +1056,7 @@ def list_session_documents(session_id: str) -> list[dict]:
 
 
 def delete_session_document(object_name: str, session_id: str) -> dict:
-    """Delete one session-scoped PDF from storage and remove its indexed chunks."""
+    """Delete one session-scoped PDF from storage and delegate cleanup to Eventarc."""
     clean_object_name = (object_name or "").strip()
     if not clean_object_name:
         raise ValueError("Missing object_name.")
@@ -1108,15 +1075,12 @@ def delete_session_document(object_name: str, session_id: str) -> dict:
     except Exception as exc:
         raise RuntimeError(f"Storage delete failed: {exc}") from exc
 
-    deleted_vectors = delete_vectors_for_source(clean_object_name, session_id=session_id)
-    deleted_status_records = delete_document_status(clean_object_name, session_id=session_id)
     return {
         "object_name": clean_object_name,
         "source_name": _display_source_name(clean_object_name),
         "session_id": session_id,
         "deleted_from_storage": existed_in_storage,
-        "deleted_vectors": deleted_vectors,
-        "deleted_status_records": deleted_status_records,
+        "cleanup_delegated_to_eventarc": existed_in_storage,
     }
 
 
@@ -1297,13 +1261,6 @@ def upload():
             DOCUMENT_TITLE_KEY_METADATA_KEY: document_title_key,
         }
         blob.upload_from_string(file_bytes, content_type="application/pdf")
-        set_document_ingestion_status(
-            object_name,
-            session_id,
-            "processing",
-            "PDF uploaded. Waiting for ingestion to start.",
-            stage="queued",
-        )
 
         replaced_documents = [
             delete_session_document(document["object_name"], session_id)
@@ -1333,7 +1290,7 @@ def upload():
                 "document_status": "processing",
                 "ready": False,
                 "chunk_count": 0,
-                "stage": "queued",
+                "stage": "waiting_for_eventarc",
                 "error_code": "",
                 "error_detail": "",
                 "status_updated_at": datetime.now(timezone.utc).isoformat(),

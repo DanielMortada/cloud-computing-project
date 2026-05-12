@@ -23,7 +23,7 @@ High-level flow:
 6. The user asks a question in the UI.
 7. The UI calls the Chat API chat endpoint.
 8. The API loads only the active session's chunks, ranks them by embedding similarity, builds the prompt, and returns a grounded answer with citations.
-9. If a PDF is deleted from the Documents UI or directly from GCS, the file is removed from storage and its vectors are removed from MongoDB.
+9. If a PDF is deleted from the Documents UI or directly from GCS, GCS emits a delete event and the cleanup Cloud Function removes its vectors and status records from MongoDB.
 
 For diagrams and deeper implementation notes, see:
 
@@ -217,7 +217,7 @@ Create a database named `smartstudy` with these collections:
 
 - `context` for PDF chunks and embeddings
 - `chat_history` for conversation state
-- `document_status` for asynchronous ingestion progress, user-facing parse failure details, and stale-ingestion timeout classification
+- `document_status` for Cloud Function-owned asynchronous ingestion progress and user-facing parse failure details
 
 Create a vector search index named `vector_index` on the `context` collection. The current embedding dimension is `768` and similarity is `cosine`.
 
@@ -226,11 +226,11 @@ Create a vector search index named `vector_index` on the `context` collection. T
 - Uploads are handled by the Chat API through `/upload`, not by direct browser-to-GCS writes.
 - Each upload is namespaced under `uploads/<session_id>/...`, which isolates one session's study materials from another.
 - Uploads are deduplicated per session with SHA-256 content hashes. Re-uploading identical bytes reuses the existing object, even under a different filename.
-- Re-uploading the same normalized filename with different content creates a new version and removes the previous same-title object and vectors.
+- Re-uploading the same normalized filename with different content creates a new version and removes the previous same-title GCS object; Eventarc then routes cleanup of its old vectors/status to `smartstudy-cleanup`.
 - Ingestion is event-driven and reproducible: a finalized object in GCS is what starts PDF processing.
 - Image-only, scanned, corrupted, or otherwise unreadable PDFs are marked as failed in `document_status` and shown in the UI with an actionable message instead of staying stuck as processing.
-- If a PDF with mixed text/images or unusual embedded objects makes ingestion stall until the worker timeout, the Chat API marks it failed after `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS` instead of showing "Ingesting" forever.
-- Cleanup is also event-driven: deleting a PDF from GCS removes its stored vectors.
+- If a PDF with mixed text/images or unusual embedded objects makes ingestion stall until the worker timeout, the Chat API derives a failed status after `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS` instead of showing "Ingesting" forever.
+- Cleanup is event-driven: deleting a PDF from GCS is the only deletion signal needed for MongoDB vector/status cleanup.
 - The UI can remove one session-scoped PDF at a time through the Documents tab, which calls `DELETE /documents`.
 - Chat memory is persisted in MongoDB and restored on refresh or reopen using session-aware history hydration (`sid` + `GET /history`).
 - The Documents tab and sidebar status badges are restored and re-synced through session-aware document hydration (`sid` + `GET /documents`).

@@ -265,8 +265,10 @@ The sidebar renders a compact readiness panel from the same `uploaded_documents`
 Each document card includes a `Delete` button. When the user clicks it:
 
 1. The UI calls `DELETE /documents` with the active `session_id` and the card's `object_name`.
-2. The backend removes the PDF from the session-scoped GCS folder and deletes the matching indexed chunks.
+2. The backend removes only the PDF from the session-scoped GCS folder.
 3. The UI refreshes `GET /documents` and removes the card from the current session state.
+
+MongoDB cleanup is intentionally delegated to the Eventarc-triggered `smartstudy-cleanup` Cloud Function. The Chat API also filters chat retrieval through active GCS source paths, so a deleted document stops contributing to answers even before asynchronous cleanup finishes.
 
 ### Chat Interaction
 

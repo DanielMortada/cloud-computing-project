@@ -137,17 +137,27 @@ Not all queries should be handled the same way. The function `retrieve_context_f
 
 ```python
 def retrieve_context_for_question(question: str, session_id: str) -> tuple[str, list[str]]:
+    active_sources = list_active_session_pdf_sources(session_id)
     if _is_quiz_command(question):
-        sampled_records = _sample_quiz_records(session_id=session_id, sample_size=10)
+        sampled_records = _sample_quiz_records(
+            session_id=session_id,
+            source_names=active_sources,
+            sample_size=10,
+        )
         return _build_context_and_sources(sampled_records)
 
-    ranked_records = _rank_session_records_by_similarity(question, session_id, limit=5)
+    ranked_records = _rank_session_records_by_similarity(
+        question,
+        session_id,
+        source_names=active_sources,
+        limit=5,
+    )
     return _build_context_and_sources(ranked_records)
 ```
 
-- **Standard questions** → the question text is embedded into a 768-dim vector and compared only against chunk vectors that belong to the active `session_id`, using **cosine similarity**. The top 5 most similar chunks are returned.
+- **Standard questions** → the API first lists active PDFs from the session's GCS folder. The question text is embedded into a 768-dim vector and compared only against chunk vectors that belong to the active `session_id` and whose `source` still exists in GCS, using **cosine similarity**. The top 5 most similar chunks are returned.
 
-- **`/quiz` command** → vector search on the literal string "/quiz" would be meaningless (no document chunk is semantically similar to the word "quiz"). Instead, we use MongoDB's `$sample` aggregation stage to randomly pick 10 chunks from the active session, giving Gemini broad material to generate a diverse quiz.
+- **`/quiz` command** → vector search on the literal string "/quiz" would be meaningless (no document chunk is semantically similar to the word "quiz"). Instead, we use MongoDB's `$sample` aggregation stage to randomly pick 10 chunks from the active session's still-present GCS sources, giving Gemini broad material to generate a diverse quiz.
 
 The API also applies a minimum similarity threshold before using retrieved chunks as context. If the best-ranked chunk is still too weakly related to the question, the API returns its no-context answer with `sources: []` instead of forcing a citation from an unrelated document.
 
@@ -309,10 +319,10 @@ Current upload handling is session-aware and deduplicated:
 
 - The API computes `content_sha256` from the uploaded PDF bytes.
 - If the same hash already exists in the session, the existing object is reused and no duplicate copy is uploaded.
-- If the same normalized filename exists with different bytes, the new file becomes the active version and the older same-title object plus vectors are deleted.
+- If the same normalized filename exists with different bytes, the new file becomes the active version and the older same-title GCS object is deleted. Vector/status cleanup is delegated to the Eventarc-triggered cleanup Cloud Function.
 - New objects store `session_id`, `original_name`, `content_sha256`, and `document_title_key` as GCS metadata.
 
-When a new object is needed, the API generates a unique object name inside the active session folder and uploads it to GCS. This triggers the Cloud Function ingestion pipeline automatically:
+When a new object is needed, the API generates a unique object name inside the active session folder and uploads it to GCS. The API does not write chunks or ingestion status directly; the GCS finalize event triggers the Cloud Function ingestion pipeline automatically:
 
 ```python
 object_name = f"{GCS_UPLOAD_PREFIX}/{session_id}/{base_name}-{uuid8}.pdf"
@@ -323,11 +333,13 @@ blob.upload_from_string(file_bytes, content_type="application/pdf")
 
 The UI calls this endpoint on page load to rebuild the Documents tab after a refresh or reopen, and reuses it for periodic live sync while files are still processing. The API lists objects only from the active session folder and returns their latest status summary.
 
-Readiness is based on four signals: whether the GCS object still exists, how many chunks exist in MongoDB `context`, the latest async ingestion record in MongoDB `document_status`, and whether that status has gone stale. That lets the API return `failed` with a user-facing explanation when the Cloud Function detects a corrupted/image-only PDF, or when ingestion stops progressing because parsing or embedding was killed by a timeout.
+Readiness is based on four signals: whether the GCS object still exists, how many chunks exist in MongoDB `context`, the latest Cloud Function-written ingestion record in MongoDB `document_status`, and whether that processing state has gone stale. That lets the API return `failed` with a user-facing explanation when the Cloud Function detects a corrupted/image-only PDF, or when ingestion stops progressing because parsing or embedding was killed by a timeout.
 
 ### `DELETE /documents` - Session document removal
 
-The UI calls this endpoint when the user deletes a document card. The API validates that the `object_name` belongs to the active `session_id`, deletes the PDF from GCS, and immediately removes indexed chunks for that same `(source, session_id)` pair.
+The UI calls this endpoint when the user deletes a document card. The API validates that the `object_name` belongs to the active `session_id` and deletes only the PDF from GCS. The resulting GCS delete event is routed by Eventarc to `smartstudy-cleanup`, which is the only component that deletes MongoDB vectors and document status records.
+
+For chat retrieval, the API lists the currently active session PDFs in GCS and only ranks chunks whose `source` is still present there. This keeps deleted documents out of answers even during the short asynchronous window before the cleanup function removes stale MongoDB records.
 
 ### `POST /documents/status` — Ingestion readiness polling
 
@@ -425,7 +437,7 @@ Environment variables are set at deploy time and include:
 - `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS` for stalled-ingestion classification
 - Vertex AI model identifiers
 
-The MongoDB collections used by the API are `context`, `chat_history`, and `document_status`. The last one stores async ingestion progress, Cloud Function failure messages, and Chat API timeout/stale-ingestion failures.
+The MongoDB collections used by the API are `context`, `chat_history`, and `document_status`. The Chat API reads `context` and `document_status`, but Cloud Functions own writes/deletes for document chunks and status records. The API only writes `chat_history` during chat interactions.
 
 The exact active conventions, deployment command, and verification commands live in the developer runbook rather than being duplicated here.
 

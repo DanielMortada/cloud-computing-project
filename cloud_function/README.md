@@ -277,7 +277,7 @@ Each chunk inserted into the `context` collection has a clean five-field structu
 
 This flat layout keeps ingestion and retrieval simple. The Chat API filters chunks by `session_id`, cites them by `source` + `page`, and status/delete/reconcile operations still use `source` as the canonical object-path field.
 
-The function also writes one document-level status record to MongoDB `document_status`. This record tracks `processing`, `ready`, or `failed`, the current stage, chunk count, and any parse error message that should be shown in the UI. The Chat API supervises this record and classifies it as failed if it remains stale beyond `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS`.
+The function also writes one document-level status record to MongoDB `document_status`. This record tracks `processing`, `ready`, or `failed`, the current stage, chunk count, and any parse error message that should be shown in the UI. The Chat API reads this record but does not create or delete it; if the record remains stale beyond `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS`, the API derives a failed status for display without mutating MongoDB.
 
 ---
 
@@ -295,7 +295,7 @@ Trigger:      Eventarc → GCS bucket events
 
 The function has no Dockerfile — Google provides the runtime. We just supply `main.py` and `requirements.txt`, and the Functions Framework handles the HTTP-to-CloudEvent translation.
 
-Both functions need access to MongoDB `context` and `document_status`: ingestion writes progress/failure states, and cleanup removes stale status records when a PDF is deleted.
+Both functions need access to MongoDB `context` and `document_status`: ingestion writes progress/failure states, and cleanup removes stale status records when a PDF is deleted. This keeps MongoDB document lifecycle mutations owned by the Eventarc-triggered Cloud Functions.
 
 The Eventarc trigger is created by the deployment command, not by Python code. The key deployment filters are:
 

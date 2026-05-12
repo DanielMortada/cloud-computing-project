@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Item \"presentation\\\\screenshots\\\\slide-20.png\" | ForEach-Object { Add-Type -AssemblyName System.Drawing; $img = [System.Drawing.Image]::FromFile\\($_.FullName\\); \"$\\($img.Width\\) x $\\($img.Height\\)\"; $img.Dispose\\(\\) })"
+    ]
+  }
+}

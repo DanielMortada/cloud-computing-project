@@ -82,9 +82,7 @@ flowchart TD
     API -->|15. Validate, hash, scan metadata| GCS
     API -->|16a. Duplicate content: reuse object| UI
     API -->|16b. Same title/new bytes: delete previous object| GCS
-    API -->|16c. Delete replaced vectors immediately| CTX
     API -->|17a. Upload new object when needed| GCS
-    API -->|17b. Mark status queued| STATUS
 
     GCS -->|18. Finalize event| INGEST[Cloud Function Gen2<br/>smartstudy-ingest]
     INGEST -->|19. Existence guard and download| GCS
@@ -104,8 +102,8 @@ flowchart TD
     API -->|28a. Prompt/social guard| DIRECT[Direct response path]
     API -->|28b. Normal: embed query| QEMB[Vertex AI Embeddings<br/>text-embedding-005]
     QEMB -->|29. Query vector| API
-    API -->|30a. Load session chunks and cosine-rank| CTX
-    API -->|30b. /quiz: sample 10 session chunks| CTX
+    API -->|30a. List active GCS sources, then cosine-rank matching chunks| CTX
+    API -->|30b. /quiz: sample 10 active-source chunks| CTX
     CTX -->|31. Context records or no useful context| API
     API -->|32a. No context direct reply| DIRECT
     DIRECT -->|33. Save direct exchange| HIST
@@ -119,14 +117,12 @@ flowchart TD
     UI -->|D1. DELETE /documents| DEL[/DELETE /documents/]
     DEL -->|D2. Receive request| API
     API -->|D3. Validate object belongs to sid| API
-    API -->|D4. Delete object| GCS
-    API -->|D5a. Delete matching vectors immediately| CTX
-    API -->|D5b. Delete document status record| STATUS
-    API -->|D6. Refresh document list| UI
-    GCS -->|D7. Delete event| CLEAN[Cloud Function Gen2<br/>smartstudy-cleanup]
-    CLEAN -->|D8. Ignore non-PDF or overwrite race| GCS
-    CLEAN -->|D9a. Delete vectors by source| CTX
-    CLEAN -->|D9b. Delete status by source| STATUS
+    API -->|D4. Delete GCS object only| GCS
+    API -->|D5. Refresh document list| UI
+    GCS -->|D6. Delete event| CLEAN[Cloud Function Gen2<br/>smartstudy-cleanup]
+    CLEAN -->|D7. Ignore non-PDF or overwrite race| GCS
+    CLEAN -->|D8a. Delete vectors by source| CTX
+    CLEAN -->|D8b. Delete status by source| STATUS
 
     UI -->|N1. New Session: DELETE /history for old sid| HISTDEL[/DELETE /history/]
     HISTDEL -->|N2. Receive request| API
@@ -179,12 +175,12 @@ Diagram steps 13-26:
 16. The upload gateway handles three cases:
     - `16a`: byte-identical content already exists, so the API reuses the existing object and no GCS finalize event is emitted.
     - `16b`: same normalized filename but new bytes, so the API deletes the previous same-title GCS object.
-    - `16c`: vectors for replaced files are deleted immediately from MongoDB `context`.
-17. If a new object is needed, the API writes it to `gs://smartstudy-pdfs-491919/uploads/<session_id>/<secure_name>-<uuid8>.pdf` with GCS metadata: `session_id`, `original_name`, `content_sha256`, and `document_title_key`, then creates a queued `document_status` record.
+    - `16c`: MongoDB cleanup for replaced objects is not performed by the API; it is delegated to the GCS delete event handled by `smartstudy-cleanup`.
+17. If a new object is needed, the API writes it to `gs://smartstudy-pdfs-491919/uploads/<session_id>/<secure_name>-<uuid8>.pdf` with GCS metadata: `session_id`, `original_name`, `content_sha256`, and `document_title_key`. It does not write chunks or `document_status` directly.
 18. GCS emits a `google.cloud.storage.object.v1.finalized` event for each newly written object.
 19. `smartstudy-ingest` verifies the object still exists, downloads it to `/tmp`, and updates `document_status` as it moves through `downloading`, `parsing`, `embedding`, and `upserting`.
 20. The function parses pages with `PyPDFLoader` and splits them with `RecursiveCharacterTextSplitter` using `chunk_size=1000` and `chunk_overlap=200`; each chunk gets `source` and `session_id` metadata.
-21. If parsing fails, or if the PDF contains no extractable alphanumeric text, the function writes `status=failed` with a user-facing message such as "This PDF does not contain extractable text..." and stops without embedding or inserting chunks. If the function is hard-killed before it can write that failure, the Chat API later converts the stale processing record to `failed`.
+21. If parsing fails, or if the PDF contains no extractable alphanumeric text, the function writes `status=failed` with a user-facing message such as "This PDF does not contain extractable text..." and stops without embedding or inserting chunks. If the function is hard-killed before it can write that failure, the Chat API reports a derived stale-processing failure during status reads without mutating MongoDB.
 22. The function generates embeddings in batches of 250 using Vertex AI `text-embedding-005`.
 23. Vertex AI returns vectors for the chunks.
 24. Before insert, the function deletes any old vectors for the same `source` object path to keep ingestion idempotent.
@@ -202,8 +198,8 @@ Diagram steps 26-39:
     - `28b`: normal questions request a query embedding from Vertex AI.
 29. Vertex AI returns the query vector for normal questions.
 30. Retrieval is session-scoped:
-    - `30a`: normal questions load only this session's indexed chunks and rank them in Python by cosine similarity against the query vector.
-    - `30b`: `/quiz` bypasses query-vector ranking and samples 10 indexed chunks from MongoDB `context` for the same session.
+    - `30a`: normal questions list active PDF object paths from GCS, load only matching indexed chunks for this session, and rank them in Python by cosine similarity against the query vector.
+    - `30b`: `/quiz` bypasses query-vector ranking and samples 10 indexed chunks only from active GCS sources for the same session.
 31. MongoDB returns context records, or there is no useful context because no chunks exist or the best similarity is below `MIN_CONTEXT_SIMILARITY`.
 32. If there is no useful context, the API builds a direct no-context answer.
 33. Direct prompt-disclosure, social, and no-context replies are still written to `chat_history`.
@@ -221,12 +217,13 @@ Diagram steps D1-D9:
 D1. User clicks `Delete` on a document card in the Documents tab.
 D2. Streamlit calls `DELETE /documents?session_id=<sid>&object_name=<gcs_path>`.
 D3. The Chat API validates that the requested object path belongs to the active session.
-D4. The Chat API deletes the matching object from GCS.
-D5. The Chat API immediately deletes indexed chunks and the `document_status` record where both `source` and `session_id` match the removed object.
-D6. The UI refreshes `GET /documents` and removes the card from the current session view.
-D7. GCS also emits a `google.cloud.storage.object.v1.deleted` event.
-D8. `smartstudy-cleanup` ignores non-PDF events and skips cleanup if the same object path still exists, which protects generation-replacement races.
-D9. If the object is truly gone, `smartstudy-cleanup` deletes vectors and status records where `source` or `object_name` matches the deleted blob path. This also covers PDFs deleted directly from GCS rather than through the UI.
+D4. The Chat API deletes only the matching object from GCS. It does not delete MongoDB vectors or `document_status` records.
+D5. The UI refreshes `GET /documents` and removes the card from the current session view because GCS is the document source of truth.
+D6. GCS emits a `google.cloud.storage.object.v1.deleted` event.
+D7. `smartstudy-cleanup` ignores non-PDF events and skips cleanup if the same object path still exists, which protects generation-replacement races.
+D8. If the object is truly gone, `smartstudy-cleanup` deletes vectors and status records where `source` or `object_name` matches the deleted blob path. This also covers PDFs deleted directly from GCS rather than through the UI.
+
+This division is intentional: the Chat API transmits the user's deletion intent by mutating GCS, while the cleanup Cloud Function is the only component that mutates MongoDB for document deletion.
 
 ### E) New Session (`DELETE /history` + fresh `sid`)
 
@@ -243,7 +240,7 @@ Diagram steps S1-S4:
 
 S1. A manual client or integration can call `POST /documents/status` with either a `documents` list or a single `object_name`.
 S2. The Chat API normalizes requested object names and optional source labels.
-S3. The API counts matching MongoDB chunks for each requested object and session, reads the latest `document_status` record, and checks whether the latest processing timestamp is older than `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS`.
+S3. The API counts matching MongoDB chunks for each requested object and session, reads the latest Cloud Function-written `document_status` record, and checks whether the latest processing timestamp is older than `DOCUMENT_PROCESSING_STALE_AFTER_SECONDS`.
 S4. If GCS is configured, the API also checks object existence and returns the same readiness vocabulary used by `GET /documents`, including user-facing `failed` messages for parse failures or stalled ingestion.
 
 ## 4) Data Model (Current)
@@ -487,10 +484,11 @@ cd ..
 - Session continuity is URL-session based (`sid`) rather than account-based identity.
 - Anyone with the same `sid` can view the same chat history and session document namespace; authentication is not enforced yet.
 - Source list may include multiple active files if user uploads several PDFs; expected behavior.
-- Readiness and sidebar sync combine indexed chunk presence, storage checks, and `document_status`; status is near-real-time but still event-driven.
+- Readiness and sidebar sync combine indexed chunk presence, storage checks, and Cloud Function-owned `document_status`; status is near-real-time but still event-driven.
 - Upload deduplication only detects exact byte-identical PDFs. Near-duplicate content with different PDF bytes is not collapsed.
 - Clicking New Session clears old chat history and local UI state, but it does not delete old-session PDFs or vectors.
 - The Atlas vector index is configured, but the active retrieval path currently filters session chunks in MongoDB and ranks them in Python with cosine similarity.
+- The Chat API filters retrieval through active GCS source paths so deleted documents stop contributing immediately, while `smartstudy-cleanup` removes the stale MongoDB records asynchronously.
 - `reconcile_context_with_bucket()` still performs a full bucket + collection consistency scan after each upload as a safety net; useful for resilience at demo scale, but not the most scalable long-term design.
 - Optional future hardening:
   - add authenticated document ownership instead of URL-session isolation alone

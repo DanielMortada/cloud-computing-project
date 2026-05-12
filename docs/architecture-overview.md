@@ -101,7 +101,7 @@ The step numbers match the diagram above.
 
 14. Student asks a normal question or types `/quiz`.
 15. Prompt-disclosure attempts and short social prompts return direct source-free replies before retrieval; otherwise the Chat API retrieves session context.
-16. Normal questions rank only the active session's stored chunk vectors; `/quiz` samples indexed chunks from the same session. If no useful context is available, the API returns a direct source-free no-context answer.
+16. Normal questions rank only chunks whose `source` is still present in the active session's GCS folder; `/quiz` samples indexed chunks from the same active-source set. If no useful context is available, the API returns a direct source-free no-context answer.
 17. Gemini generates an answer grounded in the returned context.
 18. Gemini returns model output to the Chat API.
 19. The Chat API stores the exchange in chat history.
@@ -111,8 +111,8 @@ The step numbers match the diagram above.
 
 D1. Student deletes a document from the Documents tab.
 D2. The Chat API deletes the matching GCS object.
-D3. The Chat API immediately deletes the matching vectors from MongoDB.
-D4-D5. The cleanup function also handles the GCS delete event as an event-driven safety sync.
+D3. GCS emits a delete event.
+D4-D5. The cleanup function handles vector/status deletion from MongoDB.
 N1-N2. New Session clears the old chat history and switches the UI to a fresh `sid`; old session PDFs remain isolated under their old `sid` until explicitly deleted.
 
 ## Main Features Already Working
@@ -132,7 +132,7 @@ N1-N2. New Session clears the old chat history and switches the UI to a fresh `s
 - Sources expander summaries are filtered to inline citations, so retrieved-but-unused documents are not shown as references.
 - Dedicated `/quiz` mode that builds quizzes from sampled indexed chunks instead of searching for the literal `/quiz` string.
 - Conversation memory restored on refresh or reopen for the same session URL (`sid`).
-- Immediate vector deletion for UI-initiated document removals, plus automatic cleanup when PDFs are deleted from GCS.
+- Event-driven vector/status deletion for UI-initiated and direct GCS document removals.
 
 ## Why This Architecture Is Good for the Project
 
