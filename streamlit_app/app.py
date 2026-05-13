@@ -850,10 +850,27 @@ def build_upload_success_message(successful_uploads: list[dict]) -> str:
     if replaced:
         parts.append(f"uploaded {replaced} replacement")
     if reused:
-        parts.append(f"reused {reused} existing")
+        parts.append(f"reused {reused} already uploaded")
 
     summary = ", ".join(parts) if parts else f"processed {total}"
-    return f"Processed {total} PDF(s): {summary}."
+    message = f"Processed {total} PDF(s): {summary}."
+    if reused:
+        message += " No duplicate copy was created for reused file(s)."
+    return message
+
+
+def upload_feedback_kind(successful_uploads: list[dict], errors: list[str]) -> str:
+    """Return the Streamlit feedback style for the last upload batch."""
+    if successful_uploads and errors:
+        return "warning"
+    if not successful_uploads:
+        return "error"
+    if all(
+        upload.get("upload_action") == "reused_duplicate"
+        for upload in successful_uploads
+    ):
+        return "info"
+    return "success"
 
 
 def poll_document_statuses(force: bool = False):
@@ -1155,31 +1172,30 @@ def render_sidebar():
                     st.session_state.uploader_key += 1
                     poll_document_statuses()
 
-                if successful_uploads and not errors:
-                    st.session_state.upload_feedback = {
-                        "kind": "success",
-                        "message": build_upload_success_message(successful_uploads),
-                    }
-                elif successful_uploads and errors:
-                    st.session_state.upload_feedback = {
-                        "kind": "warning",
-                        "message": (
-                            f"{build_upload_success_message(successful_uploads)} "
+                feedback_kind = upload_feedback_kind(successful_uploads, errors)
+                if successful_uploads:
+                    feedback_message = build_upload_success_message(successful_uploads)
+                    if errors:
+                        feedback_message = (
+                            f"{feedback_message} "
                             f"with {len(errors)} issue(s): {' | '.join(errors)}"
-                        ),
-                    }
+                        )
                 else:
-                    st.session_state.upload_feedback = {
-                        "kind": "error",
-                        "message": " | ".join(errors) if errors else "Upload failed.",
-                    }
+                    feedback_message = " | ".join(errors) if errors else "Upload failed."
+
+                st.session_state.upload_feedback = {
+                    "kind": feedback_kind,
+                    "message": feedback_message,
+                }
 
                 st.rerun()
 
         feedback = st.session_state.upload_feedback
         if feedback:
-            if feedback["kind"] == "success" and not st.session_state.uploaded_documents:
+            if feedback["kind"] == "success":
                 st.success(feedback["message"])
+            elif feedback["kind"] == "info":
+                st.info(feedback["message"])
             elif feedback["kind"] == "warning":
                 st.warning(feedback["message"])
             elif feedback["kind"] == "error":

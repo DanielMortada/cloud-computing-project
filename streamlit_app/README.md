@@ -227,13 +227,15 @@ The sidebar contains a file uploader widget. When the user clicks "Upload select
 1. Each file is sent individually to `POST /upload` via `requests.post`, together with the active `session_id`
 2. The API may upload a new object, reuse an exact duplicate already in the session, or replace an older same-title version
 3. Successful results are tracked in `st.session_state.uploaded_documents`
-4. The UI immediately starts polling `GET /documents` for ingestion status
+4. The sidebar shows an upload result message for every batch. Exact duplicates are shown as reused files, with no new duplicate copy created.
+5. The UI immediately starts polling `GET /documents` for ingestion status
 
 ```mermaid
 stateDiagram-v2
     [*] --> Selected: User picks PDFs
     Selected --> Uploading: Click "Upload"
-    Uploading --> Processing: API confirms upload
+    Uploading --> Processing: API uploads a new/replacement file
+    Uploading --> Ready: API reuses an already indexed duplicate
     Processing --> Ready: Chunks appear in MongoDB
     Processing --> Failed: Parser reports no extractable text
     Processing --> Processing: Status poll (every 4s)
