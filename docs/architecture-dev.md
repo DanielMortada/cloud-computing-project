@@ -204,11 +204,11 @@ Diagram steps 26-39:
 32. If there is no useful context, the API builds a direct no-context answer.
 33. Direct prompt-disclosure, social, and no-context replies are still written to `chat_history`.
 34. Direct replies return to the UI with an empty `sources` list.
-35. For grounded answers, `RunnableWithMessageHistory` loads and saves conversation messages through MongoDB `chat_history`.
+35. For grounded answers, the Chat API loads previous messages from MongoDB `chat_history`.
 36. The Chat API composes the prompt from the tutor system instructions, conversation history, retrieved context, and current question.
 37. Gemini 2.5 Flash generates the answer with `max_output_tokens=8192`.
-38. The API filters the source summary against inline citations in the generated answer, keeping only cited file/page labels.
-39. The API returns `answer` plus the deduplicated cited-only `sources` list.
+38. The API runs `ensure_pedagogical_closure(answer)`, which leaves good answers untouched but appends a brief "Check your understanding" question and/or "Study tip" if either is missing. This guard is skipped for no-context responses.
+39. The API saves the final visible answer to `chat_history`, filters the source summary against inline citations in that final answer, and returns `answer` plus the deduplicated cited-only `sources` list.
 
 ### D) Document Delete and Cleanup (`DELETE /documents` + `smartstudy-cleanup`)
 

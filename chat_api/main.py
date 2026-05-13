@@ -25,7 +25,6 @@ from langchain_google_vertexai import ChatVertexAI, VertexAIEmbeddings
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_mongodb.chat_message_histories import MongoDBChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.output_parsers import StrOutputParser
 from pymongo import MongoClient
 
@@ -76,8 +75,10 @@ Rules you MUST follow:
    "I don't have enough information in the uploaded notes to answer this."
 3. **Summarize clearly**: Use bullet points, numbered lists, or short \
    paragraphs. Prefer structured answers.
-4. **Be pedagogical**: After answering, suggest a follow-up question or a \
-   study tip to deepen understanding.
+4. **Be pedagogical**: After each grounded answer, include both a brief, \
+   non-intrusive "Check your understanding" question and a concise \
+   "Study tip". The check should invite the student to explain, compare, \
+   or apply the concept rather than forcing a long response.
 5. **Quiz mode**: When the user sends "/quiz", generate a 5-question \
    multiple-choice quiz based on the retrieved context, then evaluate the \
    student's answers in the follow-up messages.
@@ -110,6 +111,24 @@ SOCIAL_PROMPTS = {
     "thank you",
     "who are you",
 }
+
+INSUFFICIENT_CONTEXT_MARKERS = (
+    "i don't have enough information in the uploaded notes to answer this",
+    "i don't have enough indexed material in the uploaded notes",
+)
+
+UNDERSTANDING_CHECK_PATTERN = re.compile(
+    r"(check your understanding|quick check|follow-up question|"
+    r"to make sure you understood|can you explain|could you explain|"
+    r"can you restate|try to explain|in your own words)",
+    flags=re.IGNORECASE,
+)
+
+STUDY_TIP_PATTERN = re.compile(
+    r"(study tip|revision tip|exam tip|learning tip|tip\s*:|"
+    r"to study this|when reviewing)",
+    flags=re.IGNORECASE,
+)
 
 PROMPT_DISCLOSURE_VERBS = {
     "display",
@@ -375,6 +394,52 @@ def _build_social_response(question: str) -> str:
     if normalized.startswith("thank"):
         return "You're welcome. Ask about your notes whenever you're ready."
     return "Hello. I'm ready to help with your study materials whenever you are."
+
+
+def _normalized_answer_text(answer: str) -> str:
+    """Normalize an answer for lightweight policy checks."""
+    return re.sub(r"\s+", " ", (answer or "").strip().lower())
+
+
+def _should_skip_pedagogical_closure(answer: str) -> bool:
+    """Return True when adding learning prompts would be inappropriate."""
+    normalized = _normalized_answer_text(answer)
+    if not normalized:
+        return True
+    return any(marker in normalized for marker in INSUFFICIENT_CONTEXT_MARKERS)
+
+
+def _has_understanding_check(answer: str) -> bool:
+    """Detect whether the answer already asks the student to check understanding."""
+    return bool(UNDERSTANDING_CHECK_PATTERN.search(answer or ""))
+
+
+def _has_study_tip(answer: str) -> bool:
+    """Detect whether the answer already includes a study tip."""
+    return bool(STUDY_TIP_PATTERN.search(answer or ""))
+
+
+def ensure_pedagogical_closure(answer: str) -> str:
+    """Ensure grounded answers end with both a gentle check and a study tip."""
+    clean_answer = (answer or "").strip()
+    if _should_skip_pedagogical_closure(clean_answer):
+        return clean_answer
+
+    additions = []
+    if not _has_understanding_check(clean_answer):
+        additions.append(
+            "**Check your understanding:** In your own words, can you restate "
+            "the key idea from this answer and explain one situation where it applies?"
+        )
+    if not _has_study_tip(clean_answer):
+        additions.append(
+            "**Study tip:** Turn the main concept and its conditions into a "
+            "two-column mini table, then cover one side and test yourself."
+        )
+
+    if not additions:
+        return clean_answer
+    return f"{clean_answer}\n\n" + "\n\n".join(additions)
 
 
 def _store_direct_response(session_id: str, question: str, answer: str):
@@ -731,7 +796,7 @@ def serialize_session_history(session_id: str) -> dict:
 
 
 def build_rag_chain():
-    """Build the LangChain LCEL chain: retrieval → prompt → LLM → output."""
+    """Build the LangChain LCEL chain: prompt → LLM → output."""
     global rag_chain
     if rag_chain is not None:
         return rag_chain
@@ -752,16 +817,7 @@ def build_rag_chain():
         ]
     )
 
-    # Base chain (without history wiring)
-    base_chain = prompt | llm | StrOutputParser()
-
-    # Wrap with message history
-    rag_chain = RunnableWithMessageHistory(
-        base_chain,
-        get_session_history,
-        input_messages_key="question",
-        history_messages_key="history",
-    )
+    rag_chain = prompt | llm | StrOutputParser()
     return rag_chain
 
 
@@ -1136,9 +1192,20 @@ def chat():
 
         # 2. Run the RAG chain with conversation history
         chain = build_rag_chain()
+        history = get_session_history(session_id)
         answer = chain.invoke(
-            {"question": question, "context": context_text},
-            config={"configurable": {"session_id": session_id}},
+            {
+                "question": question,
+                "context": context_text,
+                "history": history.messages,
+            },
+        )
+        answer = ensure_pedagogical_closure(answer)
+        history.add_messages(
+            [
+                HumanMessage(content=question),
+                AIMessage(content=answer),
+            ]
         )
         cited_sources = filter_sources_to_answer_citations(answer, sources)
 

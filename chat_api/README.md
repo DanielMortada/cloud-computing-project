@@ -198,7 +198,7 @@ The retrieved context is injected into a carefully crafted system prompt that de
 │   - Cite sources with filename + page   │
 │   - Never hallucinate                   │
 │   - Use structured answers              │
-│   - Be pedagogical                      │
+│   - Add understanding check + study tip │
 │   - Quiz mode rules                     │
 │   - {context} ← injected chunks         │
 ├─────────────────────────────────────────┤
@@ -233,17 +233,23 @@ llm = ChatVertexAI(
 )
 ```
 
-**6. Conversation memory**
+**6. Pedagogical closure and conversation memory**
 
-LangChain's `RunnableWithMessageHistory` automatically saves each exchange (user question + assistant answer) to MongoDB's `chat_history` collection, keyed by `session_id`. On the next request with the same session, the full conversation is reloaded:
+The model is instructed to end grounded answers with both a short "Check your understanding" question and a concise "Study tip". The API also runs a lightweight post-generation guard with `ensure_pedagogical_closure(answer)` so the UI still gets both elements if the model only returns one of them.
+
+After this guard runs, the API saves the final visible exchange (user question + assistant answer) to MongoDB's `chat_history` collection, keyed by `session_id`. On the next request with the same session, the conversation is reloaded and passed into the prompt:
 
 ```python
-rag_chain = RunnableWithMessageHistory(
-    base_chain,
-    get_session_history,           # returns MongoDBChatMessageHistory
-    input_messages_key="question",
-    history_messages_key="history",
+history = get_session_history(session_id)
+answer = chain.invoke(
+    {
+        "question": question,
+        "context": context_text,
+        "history": history.messages,
+    }
 )
+answer = ensure_pedagogical_closure(answer)
+history.add_messages([HumanMessage(content=question), AIMessage(content=answer)])
 ```
 
 ---
@@ -395,13 +401,12 @@ LangChain is the glue that ties together retrieval, prompting, LLM calls, and me
 | `ChatVertexAI` | Sends prompts to Gemini 2.5 Flash |
 | `ChatPromptTemplate` | Structures the system + history + question prompt |
 | `MongoDBChatMessageHistory` | Persists conversation turns in MongoDB |
-| `RunnableWithMessageHistory` | Automatically loads/saves history per session |
 | `StrOutputParser` | Extracts the text response from the LLM output |
 
 The entire chain is expressed as a single LCEL (LangChain Expression Language) pipeline:
 
 ```python
-base_chain = prompt | llm | StrOutputParser()
+rag_chain = prompt | llm | StrOutputParser()
 ```
 
 This reads as: _"take the prompt, pipe it to the LLM, parse the output as a string."_
