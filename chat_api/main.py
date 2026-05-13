@@ -75,10 +75,12 @@ Rules you MUST follow:
    "I don't have enough information in the uploaded notes to answer this."
 3. **Summarize clearly**: Use bullet points, numbered lists, or short \
    paragraphs. Prefer structured answers.
-4. **Be pedagogical**: After each grounded answer, include both a brief, \
-   non-intrusive "Check your understanding" question and a concise \
-   "Study tip". The check should invite the student to explain, compare, \
-   or apply the concept rather than forcing a long response.
+4. **Be pedagogical when it fits**: After a substantive answer grounded in \
+   the uploaded course material, include both a brief, non-intrusive \
+   "Check your understanding" question and a concise "Study tip". Do not \
+   add these sections after greetings, thanks, name acknowledgements, \
+   insufficient-context replies, refusals, or other non-course-material \
+   conversational replies.
 5. **Quiz mode**: When the user sends "/quiz", generate a 5-question \
    multiple-choice quiz based on the retrieved context, then evaluate the \
    student's answers in the follow-up messages.
@@ -113,8 +115,13 @@ SOCIAL_PROMPTS = {
 }
 
 INSUFFICIENT_CONTEXT_MARKERS = (
-    "i don't have enough information in the uploaded notes to answer this",
+    "i don't have enough information in the uploaded notes",
+    "i do not have enough information in the uploaded notes",
     "i don't have enough indexed material in the uploaded notes",
+    "i do not have enough indexed material in the uploaded notes",
+    "not enough information in the uploaded notes",
+    "not present in the uploaded notes",
+    "not in the uploaded notes",
 )
 
 UNDERSTANDING_CHECK_PATTERN = re.compile(
@@ -329,11 +336,26 @@ def _contains_any_phrase(text: str, phrases) -> bool:
     return any(phrase in text for phrase in phrases)
 
 
+def _extract_name_introduction(question: str) -> str:
+    """Return the introduced name for simple name-sharing prompts."""
+    normalized = _normalize_prompt_for_match(question)
+    match = re.match(
+        r"^(?:my name is|my name s|call me)\s+"
+        r"(?P<name>[a-z][a-z0-9_-]*)(?:\s+btw)?$",
+        normalized,
+    )
+    if not match:
+        return ""
+    return match.group("name").replace("_", " ").replace("-", " ").title()
+
+
 def _is_social_prompt(question: str) -> bool:
     """Return True for short social prompts that should not cite documents."""
     normalized = _normalize_prompt_for_match(question)
     if not normalized:
         return False
+    if _extract_name_introduction(question):
+        return True
     if normalized in SOCIAL_PROMPTS:
         return True
     return any(
@@ -380,6 +402,13 @@ def _build_prompt_disclosure_response() -> str:
 
 def _build_social_response(question: str) -> str:
     """Return a polite, source-free reply for social prompts."""
+    introduced_name = _extract_name_introduction(question)
+    if introduced_name:
+        return (
+            f"Nice to meet you, {introduced_name}. "
+            "Ask me about your lecture notes whenever you're ready."
+        )
+
     normalized = _normalize_prompt_for_match(question)
     if normalized.startswith("how are you"):
         return (
@@ -401,10 +430,19 @@ def _normalized_answer_text(answer: str) -> str:
     return re.sub(r"\s+", " ", (answer or "").strip().lower())
 
 
-def _should_skip_pedagogical_closure(answer: str) -> bool:
+def _should_skip_pedagogical_closure(
+    answer: str,
+    *,
+    cited_sources: list[str] | None = None,
+    question: str = "",
+) -> bool:
     """Return True when adding learning prompts would be inappropriate."""
     normalized = _normalized_answer_text(answer)
     if not normalized:
+        return True
+    if _is_quiz_command(question):
+        return True
+    if not cited_sources:
         return True
     return any(marker in normalized for marker in INSUFFICIENT_CONTEXT_MARKERS)
 
@@ -419,10 +457,19 @@ def _has_study_tip(answer: str) -> bool:
     return bool(STUDY_TIP_PATTERN.search(answer or ""))
 
 
-def ensure_pedagogical_closure(answer: str) -> str:
-    """Ensure grounded answers end with both a gentle check and a study tip."""
+def ensure_pedagogical_closure(
+    answer: str,
+    *,
+    cited_sources: list[str] | None = None,
+    question: str = "",
+) -> str:
+    """Ensure cited course-material answers include a gentle check and study tip."""
     clean_answer = (answer or "").strip()
-    if _should_skip_pedagogical_closure(clean_answer):
+    if _should_skip_pedagogical_closure(
+        clean_answer,
+        cited_sources=cited_sources,
+        question=question,
+    ):
         return clean_answer
 
     additions = []
@@ -1200,14 +1247,18 @@ def chat():
                 "history": history.messages,
             },
         )
-        answer = ensure_pedagogical_closure(answer)
+        cited_sources = filter_sources_to_answer_citations(answer, sources)
+        answer = ensure_pedagogical_closure(
+            answer,
+            cited_sources=cited_sources,
+            question=question,
+        )
         history.add_messages(
             [
                 HumanMessage(content=question),
                 AIMessage(content=answer),
             ]
         )
-        cited_sources = filter_sources_to_answer_citations(answer, sources)
 
         return jsonify({"answer": answer, "sources": cited_sources})
 

@@ -207,8 +207,8 @@ Diagram steps 26-39:
 35. For grounded answers, the Chat API loads previous messages from MongoDB `chat_history`.
 36. The Chat API composes the prompt from the tutor system instructions, conversation history, retrieved context, and current question.
 37. Gemini 2.5 Flash generates the answer with `max_output_tokens=8192`.
-38. The API runs `ensure_pedagogical_closure(answer)`, which leaves good answers untouched but appends a brief "Check your understanding" question and/or "Study tip" if either is missing. This guard is skipped for no-context responses.
-39. The API saves the final visible answer to `chat_history`, filters the source summary against inline citations in that final answer, and returns `answer` plus the deduplicated cited-only `sources` list.
+38. The API filters the source summary against inline citations in the generated answer. Only if the answer cites retrieved course material does it run `ensure_pedagogical_closure(answer)`, which leaves good answers untouched but appends a brief "Check your understanding" question and/or "Study tip" if either is missing. This guard is skipped for social replies, name acknowledgements, quiz output, no-context/refusal responses, and other non-course-material replies.
+39. The API saves the final visible answer to `chat_history` and returns `answer` plus the deduplicated cited-only `sources` list.
 
 ### D) Document Delete and Cleanup (`DELETE /documents` + `smartstudy-cleanup`)
 

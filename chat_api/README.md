@@ -198,7 +198,7 @@ The retrieved context is injected into a carefully crafted system prompt that de
 │   - Cite sources with filename + page   │
 │   - Never hallucinate                   │
 │   - Use structured answers              │
-│   - Add understanding check + study tip │
+│   - Conditional check + study tip       │
 │   - Quiz mode rules                     │
 │   - {context} ← injected chunks         │
 ├─────────────────────────────────────────┤
@@ -235,7 +235,7 @@ llm = ChatVertexAI(
 
 **6. Pedagogical closure and conversation memory**
 
-The model is instructed to end grounded answers with both a short "Check your understanding" question and a concise "Study tip". The API also runs a lightweight post-generation guard with `ensure_pedagogical_closure(answer)` so the UI still gets both elements if the model only returns one of them.
+The model is instructed to end substantive, course-material answers with both a short "Check your understanding" question and a concise "Study tip". The API also runs a lightweight post-generation guard so the UI still gets both elements when appropriate. That guard is conditional: it only runs when the final answer cites retrieved note material, and it skips greetings, thanks, name acknowledgements, quiz output, insufficient-context replies, and other non-course conversational responses.
 
 After this guard runs, the API saves the final visible exchange (user question + assistant answer) to MongoDB's `chat_history` collection, keyed by `session_id`. On the next request with the same session, the conversation is reloaded and passed into the prompt:
 
@@ -248,7 +248,12 @@ answer = chain.invoke(
         "history": history.messages,
     }
 )
-answer = ensure_pedagogical_closure(answer)
+cited_sources = filter_sources_to_answer_citations(answer, sources)
+answer = ensure_pedagogical_closure(
+    answer,
+    cited_sources=cited_sources,
+    question=question,
+)
 history.add_messages([HumanMessage(content=question), AIMessage(content=answer)])
 ```
 
